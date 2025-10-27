@@ -1,71 +1,120 @@
-# mira/agents/browser_agent.py
-import asyncio
-import re
-import inflect
-from typing import Dict, Any, Optional
-from urllib.parse import quote
+# ======================================
+# mira/agents/browser_agent.py  (enhanced full-page + persistent Playwright reuse)
+# ======================================
+import asyncio, re, os, base64, brotli, zlib, inflect, requests
+from time import time
 from datetime import datetime
-import requests
+from typing import Dict, Any, Optional, List
+from urllib.parse import quote
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
 from scrapy.http import HtmlResponse
 from scrapy.selector import Selector
+from playwright.async_api import async_playwright
+from openai import OpenAI
+from browser_use import BrowserSession
 from mira.core.config import cfg
 from mira.utils import logger
-from browser_use import BrowserSession
 from mira.core import domain_trust
-import brotli
-import zlib
+from PIL import Image
+import aiofiles
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
 
 _engine = inflect.engine()
+
+# ---------------- Helpers ----------------
 def _normalize_scores(text: str) -> str:
-    """
-    Normalize sports scores for TTS:
-    - Convert '38-30' or '38,30' → 'thirty-eight to thirty'
-    - Skip large stat numbers like '120 yards', '10 pts', etc.
-    """
     if not text:
         return text
-
     def repl(m):
         n1, n2 = int(m.group(1)), int(m.group(2))
         return f"{_engine.number_to_words(n1)} to {_engine.number_to_words(n2)}"
+    pattern = re.compile(r"\b(\d{1,3})[,–-](\d{1,3})\b(?!\s*(?:yards?|pts?|reb|ast|blk|mins?|turnovers?))", re.I)
+    return pattern.sub(repl, text)
 
-    score_pattern = re.compile(
-        r"\b(\d{1,3})[,–-](\d{1,3})\b"
-        r"(?!\s*(?:yards?|yds?|pts?|reb|ast|stl|blk|fouls?|mins?|turnovers?))",
-        re.IGNORECASE,
-    )
-
-    return score_pattern.sub(repl, text)
-
+# ======================================================================
+# MAIN AGENT
+# ======================================================================
 class BrowserAgent:
     def __init__(self, headless: bool = False, max_tabs: int = 5):
         self.headless = headless
-        self.browser_session: Optional[BrowserSession] = None
         self.max_tabs = max_tabs
+        self.browser_session: Optional[BrowserSession] = None
         self._started = False
 
-    # ----------------- Browser-use Session -----------------
+        # persistent Playwright vars
+        self._pw = None
+        self._pw_context = None
+
+        try:
+            self.llm_facts = ChatOpenAI(
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=800,
+                streaming=False
+            )
+            print("✅ [DEBUG] ChatOpenAI (llm_facts) initialized for BrowserAgent.")
+        except Exception as e:
+            logger.log_error(e, context="BrowserAgent.llm_facts_init")
+            self.llm_facts = None
+
+    # ======================================================
+    # 🔹 Playwright persistent context management
+    # ======================================================
+    async def _ensure_playwright(self):
+        if self._pw_context:
+            return
+        self._pw = await async_playwright().start()
+        self._pw_context = await self._pw.chromium.launch_persistent_context(
+            user_data_dir="/tmp/mira_pw_shared",
+            headless=self.headless,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+            ],
+        )
+        print("✅ [DEBUG] Persistent Playwright context ready.")
+
+    async def close_playwright(self):
+        if self._pw_context:
+            await self._pw_context.close()
+            print("🧹 [DEBUG] Closed persistent Playwright context.")
+            self._pw_context = None
+        if self._pw:
+            await self._pw.stop()
+            print("🧹 [DEBUG] Stopped Playwright engine.")
+            self._pw = None
+
+    # ======================================================
+    # 🔹 Browser-use session (optional)
+    # ======================================================
     async def _ensure_browser_use(self):
-        """Lazy init for browser-use session."""
         if not self.browser_session or not self._started:
             try:
                 self.browser_session = BrowserSession(
-                    headless=self.headless,
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/116 Safari/537.36"
-                    ),
+                    headless=False,
+                    user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116 Safari/537.36")
                 )
                 await self.browser_session.start()
                 self._started = True
+                logger.log_info("Browser session initialized", context="BrowserAgent")
+
+                try:
+                    tabs = await self.browser_session.list_tabs()
+                    for t in tabs:
+                        current_url = (await self.browser_session.get_tab_url(t)) or ""
+                        if current_url.strip() in ("", "about:blank"):
+                            await self.browser_session.close_tab(t)
+                            print("🧹 [DEBUG] Closed BrowserUse blank starter tab.")
+                except Exception as te:
+                    logger.log_error(te, context="BrowserAgent._ensure_browser_use.cleanup_tabs")
             except Exception as e:
                 logger.log_error(e, context="BrowserAgent._ensure_browser_use")
 
     async def browser_use_get(self, url: str) -> str:
-        """Fetch page content using browser-use (opens or navigates current tab)."""
         await self._ensure_browser_use()
         try:
             await self.browser_session.navigate_to(url)
@@ -73,10 +122,22 @@ class BrowserAgent:
             title = await self.browser_session.get_current_page_title()
             return f"<title>{title}</title> {html}"
         except Exception as e:
-            logger.log_error(e, context="BrowserAgent.browser_use_get")
-            return ""
+            logger.log_error(e, context="BrowserAgent.browser_use_get (retry)")
+            try:
+                await self.browser_session.stop()
+                self._started = False
+                await self._ensure_browser_use()
+                await self.browser_session.navigate_to(url)
+                html = await self.browser_session.get_current_page_url()
+                title = await self.browser_session.get_current_page_title()
+                return f"<title>{title}</title> {html}"
+            except Exception as e2:
+                logger.log_error(e2, context="BrowserAgent.browser_use_get.final_fail")
+                return ""
 
-    # ----------------- Requests + Scrapy (with Brotli/gzip) -----------------
+    # ======================================================
+    # 🔹 Core scrapers
+    # ======================================================
     def _decode_body(self, resp: requests.Response) -> str:
         try:
             enc = resp.headers.get("content-encoding", "").lower()
@@ -88,15 +149,28 @@ class BrowserAgent:
         except Exception:
             return resp.text
 
+    def _scrape_with_requests(self, url: str) -> str:
+        try:
+            resp = requests.get(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/116 Safari/537.36",
+                    "Accept-Encoding": "gzip, deflate, br",
+                },
+                timeout=12,
+            )
+            if not resp.ok:
+                return ""
+            return self._decode_body(resp)
+        except Exception as e:
+            logger.log_error(e, context="BrowserAgent._scrape_with_requests")
+            return ""
+
     def _scrape_with_scrapy(self, url: str) -> str:
         try:
             headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/116 Safari/537.36"
-                ),
-                "Accept-Encoding": "gzip, deflate, br"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/116 Safari/537.36",
+                "Accept-Encoding": "gzip, deflate, br",
             }
             resp = requests.get(url, timeout=12, headers=headers)
             if not resp.ok:
@@ -108,118 +182,136 @@ class BrowserAgent:
             logger.log_error(e, context="BrowserAgent._scrape_with_scrapy")
             return ""
 
-    def _scrape_with_requests(self, url: str) -> str:
+    # ======================================================
+    # 🔹 Scroll + full-page capture
+    # ======================================================
+    async def _scroll_and_capture_full_page(self, page, base_path: str) -> str:
+        stitched_path = f"{base_path}_stitched.png"
         try:
-            resp = requests.get(
-                url,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/116 Safari/537.36"
-                    ),
-                    "Accept-Encoding": "gzip, deflate, br"
-                },
-                timeout=12,
-            )
-            if not resp.ok:
-                return ""
-            return self._decode_body(resp)
+            await page.evaluate("""
+                (async () => {
+                    let lastHeight = 0;
+                    while (true) {
+                        window.scrollBy(0, window.innerHeight);
+                        await new Promise(r => setTimeout(r, 500));
+                        let newHeight = document.body.scrollHeight;
+                        if (newHeight === lastHeight) break;
+                        lastHeight = newHeight;
+                    }
+                })();
+            """)
+            await page.screenshot(path=stitched_path, full_page=True)
+            print(f"✅ [DEBUG] Full-page screenshot saved: {stitched_path}")
+            return stitched_path
         except Exception as e:
-            logger.log_error(e, context="BrowserAgent._scrape_with_requests")
+            logger.log_error(e, context="_scroll_and_capture_full_page")
             return ""
 
-    # ----------------- Playwright -----------------
-    async def _scrape_with_playwright(self, url: str, intent: Optional[str] = None) -> str:
-        """General page scraper with persistent context and consistent waits."""
+    # ======================================================
+    # 🔹 Playwright scrape (persistent reuse)
+    # ======================================================
+    async def _scrape_with_playwright(self, url: str, intent: Optional[str] = None, capture: bool = False):
+        """Scrape a page using a shared persistent Playwright context."""
+        await self._ensure_playwright()  # ensures persistent browser exists
+        screenshot_path = None
+        page = None
+
         try:
-            async with async_playwright() as p:
-                context = await p.chromium.launch_persistent_context(
-                    user_data_dir=cfg.PLAYWRIGHT_PROFILE,
-                    headless=self.headless,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-blink-features=AutomationControlled",
-                        "--disable-dev-shm-usage",
-                    ],
-                )
-                page = await context.new_page()
+            # 🧩 Create a new tab in the shared context
+            page = await self._pw_context.new_page()
+            await page.goto(url, timeout=45000, wait_until="domcontentloaded")
 
-                # Always use domcontentloaded
-                await page.goto(url, timeout=45000, wait_until="domcontentloaded")
+            # 🕐 Wait depending on site type
+            extra_wait = 10000 if intent in ("sports", "finance") else 6000
+            await page.wait_for_timeout(extra_wait)
 
-                # ⏳ Extra wait for dynamic rendering
-                extra_wait = 8000 if intent in ("sports", "finance") else 5000
-                await page.wait_for_timeout(extra_wait)
+            # 📜 Scroll to trigger lazy loading
+            for _ in range(3):
+                await page.evaluate("window.scrollBy(0, window.innerHeight)")
+                await page.wait_for_timeout(1000)
 
-                # News-specific: check article paragraphs
-                if intent == "news":
-                    try:
-                        await page.wait_for_selector(
-                            "article p, main p, .story p, #content p, #main-content p, "
-                            ".article-body p, .post-content p, .entry-content p, .paragraph",
-                            timeout=6000
-                        )
-                    except Exception:
-                        logger.log_error(
-                            "No article paragraphs found",
-                            context="BrowserAgent._scrape_with_playwright"
-                        )
+            # 📸 Capture full page if needed
+            if capture:
+                base_dir = "/Volumes/HDD-1/mira_screens"
+                os.makedirs(base_dir, exist_ok=True)
+                base_path = os.path.join(base_dir, f"mira_{int(time())}")
+                screenshot_path = await self._scroll_and_capture_full_page(page, base_path)
+                print(f"✅ [DEBUG] Full-page screenshot captured: {screenshot_path}")
 
-                # --- Trigger lazy load (shallow scroll) ---
-                try:
-                    await page.evaluate(
-                        "window.scrollBy(0, Math.min(1200, document.body.scrollHeight));"
-                    )
-                    await page.wait_for_timeout(1000)  # allow JS to render
-                except Exception:
-                    pass
+            html = await page.content()
+            print(f"✅ [DEBUG] Scraped successfully: {url}")
+            return html or "", screenshot_path
 
-                html = await page.content()
+        except Exception as e:
+            logger.log_error(e, context=f"BrowserAgent._scrape_with_playwright ({url})")
+            return "", None
 
+        finally:
+            # 🧹 Only close the tab, not the entire context
+            if page:
                 try:
                     await page.close()
                 except Exception:
                     pass
 
-                return html or ""
+    # ======================================================
+    # 🔹 Unified scrape orchestrator
+    # ======================================================
+    async def _scrape_page(self, url: str, stateful: bool = False, intent: Optional[str] = None, capture: bool = False):
+        try:
+            if stateful:
+                await self.browser_use_get(url)
+
+            html, screenshot_path = await self._scrape_with_playwright(url, intent=intent, capture=capture)
+            if html and len(html) > 1000:
+                return html, screenshot_path
+
+            html = self._scrape_with_requests(url)
+            if html and len(html) > 500:
+                return html, None
+
+            html = self._scrape_with_scrapy(url)
+            if html and len(html) > 500:
+                return html, None
+
+            return html, screenshot_path
         except Exception as e:
-            logger.log_error(e, context="BrowserAgent._scrape_with_playwright")
-            return ""
+            logger.log_error(e, context="BrowserAgent._scrape_page")
+            return "", None
 
+    # ======================================================
+    # 🔹 Smart extract + summarization
+    # ======================================================
+    async def smart_extract(self, query: str, url: str, stateful: bool = False) -> dict:
+        intent = domain_trust.intent_from_query(query)
+        html, screenshot_path = await self._scrape_page(url, stateful=stateful, intent=intent, capture=True)
+        if not html or len(html) < 1000:
+            return {"text": "", "screenshot_path": screenshot_path}
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            title = (soup.title.string.strip() if soup.title else "").strip()
+            text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+            if intent == "sports":
+                match = re.search(r"(\d{1,3})\s*[-–:]\s*(\d{1,3})", text)
+                extracted = f"Final score: {match.group(1)} to {match.group(2)}." if match else text[:600]
+            elif intent == "news":
+                paras = [p.get_text(" ", strip=True) for p in soup.find_all("p") if len(p.get_text(strip=True)) > 60][:4]
+                extracted = " ".join(paras) if paras else text[:600]
+            else:
+                extracted = text[:600]
+            extracted = _normalize_scores(extracted)
+            final_text = f"{title}: {extracted}".strip() if title else extracted.strip()
+            return {"text": final_text, "screenshot_path": screenshot_path}
+        except Exception as e:
+            logger.log_error(e, context="BrowserAgent.smart_extract.html_parse")
+            return {"text": "", "screenshot_path": screenshot_path}
 
-    # ----------------- Unified Entry -----------------
-    async def _scrape_page(self, url: str, stateful: bool = False, intent: Optional[str] = None) -> str:
-        if stateful:
-            await self.browser_use_get(url)
-            html = await self._scrape_with_playwright(url, intent=intent)
-            if html:
-                return html
-
-        html = self._scrape_with_requests(url)
-        if html and len(html) > 500:
-            return html
-        html = self._scrape_with_scrapy(url)
-        if html and len(html) > 500:
-            return html
-        return await self._scrape_with_playwright(url, intent=intent)
-
-    # ----------------- Query Normalization -----------------
-    def _normalize_query(self, query: str) -> str:
-        fillers = [
-            "could you", "can you", "please", "tell me", "thank you",
-            "add", "show me", "what is", "what's", "fetch", "search for", "find",
-        ]
-        q = query.lower()
-        for f in fillers:
-            q = q.replace(f, "")
-        return re.sub(r"\s+", " ", q).strip()
-
-    # ----------------- Search Engine Aggregator -----------------
+    # ======================================================
+    # 🔹 Search & concurrent gather
+    # ======================================================
     async def search(self, query: str, max_sites: int = 8) -> Dict[str, Any]:
         today = datetime.now().strftime("%b %d, %Y")
-        primed_q = f"{self._normalize_query(query)} {today}"
+        primed_q = f"{query} {today}"
         engines = {
             "brave": f"https://search.brave.com/search?q={quote(primed_q)}",
             "bing": f"https://www.bing.com/search?q={quote(primed_q)}",
@@ -229,18 +321,15 @@ class BrowserAgent:
         for _, url in engines.items():
             html = self._scrape_with_requests(url) or self._scrape_with_scrapy(url)
             if not html:
-                html = await self._scrape_with_playwright(url)
+                html, _ = await self._scrape_with_playwright(url)
             if not html:
                 continue
             soup = BeautifulSoup(html, "html.parser")
-            raw_links = [
-                (a.get("href", ""), a.get_text(strip=True))
-                for a in soup.select("a")
-            ]
+            raw_links = [(a.get("href", ""), a.get_text(strip=True)) for a in soup.select("a")]
             links = [
                 {"title": text or href, "url": href}
                 for href, text in raw_links
-                if href and href.startswith("http")
+                if href.startswith("http")
                 and not any(bad in href for bad in ["accounts.google.com", "support.google.com", "policies.google.com"])
             ]
             for link in links[:max_sites]:
@@ -249,107 +338,74 @@ class BrowserAgent:
                     all_links.append(link)
         return {"query": query, "links": all_links[:max_sites]}
 
-    # ----------------- Smart Extract -----------------
-    async def smart_extract(self, query: str, url: str, stateful: bool = False) -> str:
-        intent = domain_trust.intent_from_query(query)
-        html = await self._scrape_page(url, stateful=stateful, intent=intent)
-        if not html:
-            return f"I couldn’t extract details, but I opened the article: {url}"
-        soup = BeautifulSoup(html, "html.parser")
-        title = (soup.title.string.strip() if soup.title else "").strip()
-        text_content = soup.get_text(" ", strip=True)
-        q = query.lower()
+    async def gather_sites_concurrently(self, query: str, urls: list[str]):
+        sem = asyncio.Semaphore(2)
+        async def fetch(url):
+            async with sem:
+                data = await self.smart_extract(query, url, stateful=True)
+                return {"url": url, **data}
+        return await asyncio.gather(*[fetch(u) for u in urls])
 
-        # 🏟 Sports
-        if intent == "sports":
-            # detect sport context
-            sport = ""
-            q_lower = query.lower()
-            if any(w in q_lower for w in ["mlb", "baseball"]):
-                sport = "baseball"
-            elif any(w in q_lower for w in ["soccer", "football (soccer)", "premier", "la liga", "serie a", "fifa"]):
-                sport = "soccer"
-            elif any(w in q_lower for w in ["nhl", "hockey"]):
-                sport = "hockey"
-            else:
-                sport = "high_scoring"  # NBA, NFL default
+    # ======================================================
+    # 🔹 Vision summarizer + orchestrator
+    # ======================================================
+    async def _multi_vision_summarize(self, query: str, site_results: list[dict]):
+        def _clean_snippet(text: str) -> str:
+            text = re.sub(r"[*•\-\n]+", " ", text)
+            return re.sub(r"\s+", " ", text).strip()
 
-            final_score_pattern = re.compile(
-                r"(?:final|full[-\s]?time|ft|result)\D{0,30}?(\d{1,3})\s*[-–:]\s*(\d{1,3})",
-                re.IGNORECASE
-            )
-            if m := final_score_pattern.search(text_content):
-                h, a = int(m.group(1)), int(m.group(2))
-                if sport == "high_scoring":
-                    if max(h, a) >= 10:
-                        return f"Final score: {h} to {a}"
-                else:
-                    return f"Final score: {h} to {a}"
+        system_prompt = (
+            "You are Mira, a warm but precise research assistant.\n"
+            "- Repeat extracted facts exactly when present.\n"
+            "- Focus on relevant info only.\n"
+            "- Ignore ads or sign-ups.\n"
+            "- Speak naturally in one or two sentences, no markdown.\n"
+            "- Mention source casually if clear (e.g., 'CNBC reports...')."
+        )
 
-            score_pattern = re.compile(
-                r"(?:score|quarter|half|period|innings|beat|defeated).{0,40}?"
-                r"(\d{1,3})\s*[-–:]\s*(\d{1,3})",
-                re.IGNORECASE
-            )
-            if m := score_pattern.search(text_content):
-                h, a = int(m.group(1)), int(m.group(2))
-                if sport == "high_scoring":
-                    if h > 3 or a > 3:  # filter out bogus 0–2 in NBA/NFL
-                        return f"Latest score I found is {h} to {a}"
-                else:
-                    return f"Latest score I found is {h} to {a}"
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"User asked: {query}\nNow review all extracts and screenshots.")
+        ]
 
-        # 📰 News
-        if intent == "news":
-            paras = [
-                p.get_text(" ", strip=True)
-                for p in soup.find_all("p")
-                if re.search(r"[A-Z].+[.!?]", p.get_text())
-            ][:3]
-            if paras:
-                cleaned = _normalize_scores(' '.join(paras))
-                return f"Here’s a quick update: {cleaned}"
+        for s in site_results:
+            try:
+                clean_text = _clean_snippet(s["text"]) if s["text"] else "(no readable text)"
+                if s.get("screenshot_path") and os.path.exists(s["screenshot_path"]):
+                    with open(s["screenshot_path"], "rb") as f:
+                        img_b64 = base64.b64encode(f.read()).decode("utf-8")
+                    messages.append(
+                        HumanMessage(content=[
+                            {"type": "text", "text": f"Screenshot from {s['url']} — analyze for relevant text."},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                        ])
+                    )
+                domain = s["url"].split("/")[2] if "://" in s["url"] else s["url"]
+                messages.append(HumanMessage(content=f"Extracted content from {domain}:\n{clean_text}"))
+            except Exception as e:
+                logger.log_error(e, context=f"BrowserAgent._multi_vision_summarize.cleanloop {s.get('url')}")
 
-        snippet = (text_content[:400] + "...") if len(text_content) > 400 else text_content
-        cleaned = _normalize_scores(snippet)
-        return f"{title}: {cleaned}" if title else cleaned
+        try:
+            resp = self.llm_facts.invoke(messages)
+            text = (resp.content or "").strip()
+            text = re.sub(r"https?://\S+", "", text)
+            text = re.sub(r"[\*\•\_\#\-\=\~\>\|`]+", " ", text)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = re.sub(r"[\u200B-\u200D\uFEFF\u2022\u2023\u25AA\u25CF]", " ", text)
+            text = re.sub(r"\s{2,}", " ", text).strip()
+            return text.encode("ascii", "ignore").decode()[:800]
+        except Exception as e:
+            logger.log_error(e, context="BrowserAgent._multi_vision_summarize.invoke_fail")
+            return "I couldn’t process the screenshots right now."
 
-    # ----------------- Answer Query -----------------
-    async def answer_query(self, query: str, url: Optional[str] = None, stateful: bool = False) -> str:
-            if url and url.startswith("http"):
-                return await self.smart_extract(query, url.strip(), stateful=stateful)
-
-            results = await self.search(query, max_sites=5)
-            links = results.get("links", [])
-            if not links:
-                return f"Sorry, I couldn’t find any relevant sources for '{query}'."
-
-            q_lower = query.lower()
-            force_stateful = False
-            if any(w in q_lower for w in ["news", "update", "headline", "breaking"]):
-                force_stateful = True
-            elif any(w in q_lower for w in ["score", "match", "game", "result", "record", "stats", "player", "team"]):
-                force_stateful = True
-
-            intent = domain_trust.intent_from_query(query)
-
-            chosen = None
-            for link in links:
-                link_url = (link.get("url") or "").strip()
-                if link_url.startswith("http"):
-                    h = domain_trust.host(link_url)
-                    if domain_trust.intent_trust_weight(h, intent, query) > 0:
-                        chosen = link
-                        break
-
-            if not chosen:
-                for link in links:
-                    link_url = (link.get("url") or "").strip()
-                    if link_url.startswith("http"):
-                        chosen = link
-                        break
-
-            if not chosen:
-                return f"Found results for '{query}', but none had valid URLs."
-
-            return await self.smart_extract(query, chosen["url"], stateful=force_stateful)
+    async def multi_site_answer(self, query: str, urls: List[str]) -> str:
+        site_results = await self.gather_sites_concurrently(query, urls)
+        summary = await self._multi_vision_summarize(query, site_results)
+        for s in site_results:
+            try:
+                if s["screenshot_path"] and os.path.exists(s["screenshot_path"]):
+                    os.remove(s["screenshot_path"])
+            except Exception:
+                pass
+        # await self.close_playwright()
+        return summary or "I couldn’t summarize these sources."

@@ -1,8 +1,11 @@
+# ======================================
+# mira/agents/browser_worker.py (final)
+# ======================================
 import asyncio
 import nest_asyncio
 from mira.agents.browser_agent import BrowserAgent
 
-# allow nested event loops (Jupyter, notebooks, threaded contexts)
+# Allow nested loops (Jupyter, REPLs, threaded orchestrators)
 nest_asyncio.apply()
 
 
@@ -14,7 +17,7 @@ def run_async(coro):
         loop = None
 
     if loop and loop.is_running():
-        # Already inside an event loop → submit coroutine to it
+        # Already inside event loop (e.g. FastAPI, notebook)
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
     else:
         return asyncio.run(coro)
@@ -22,16 +25,14 @@ def run_async(coro):
 
 class BrowserWorker:
     """
-    Thin wrapper around BrowserAgent.
-    Provides sync-friendly methods for testing/notebooks,
-    while delegating to BrowserAgent's async methods.
+    Thin sync-friendly wrapper around BrowserAgent.
+    Supports async calls while keeping sync APIs for graph nodes.
     """
 
     def __init__(self, headless: bool = False, always_browser: bool = False):
         """
-        :param headless: If False, Playwright/BrowserSession shows a real window.
-        :param always_browser: If True, every call uses a real browser tab.
-                               If False, browser opens only when query type forces it.
+        :param headless: If False, opens real browser windows (debug use).
+        :param always_browser: If True, always forces Playwright for every call.
         """
         self.agent = BrowserAgent(headless=headless)
         self.always_browser = always_browser
@@ -43,8 +44,10 @@ class BrowserWorker:
         return await self.agent.search(query, max_sites)
 
     async def smart_extract(self, query: str, url: str, stateful: bool = False):
-        # force browser if always_browser is enabled
         return await self.agent.smart_extract(query, url, stateful=(self.always_browser or stateful))
+
+    async def multi_site_answer(self, query: str, urls: list[str]):
+        return await self.agent.multi_site_answer(query, urls)
 
     # ---------------------------
     # ✅ Sync wrappers
@@ -54,6 +57,9 @@ class BrowserWorker:
 
     def smart_extract_sync(self, query: str, url: str, stateful: bool = False):
         return run_async(self.smart_extract(query, url, stateful=stateful))
+
+    def multi_site_answer_sync(self, query: str, urls: list[str]):
+        return run_async(self.multi_site_answer(query, urls))
 
     def browser_use_get_sync(self, url: str):
         """Explicitly open a tab in browser-use."""
