@@ -2,6 +2,7 @@
 import re
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
+import geocoder 
 
 # ---- Domain trust maps -----------------------------------------------------
 TRUSTED_SPORTS = {
@@ -177,34 +178,89 @@ def page_type_bonus(url: str, title: str, intent: str) -> int:
 
 
 def intent_from_query(q: str) -> str:
-    """Guess intent type from a query string."""
-    t = (q or "").lower()
+    """Infer semantic intent from natural language search queries."""
+    t = (q or "").lower().strip()
 
-    # 💰 Price / Shopping
-    if any(k in t for k in ("price", "cost", "how much", "₹", "$")):
+    # 📊 Finance / Markets / Crypto  (check BEFORE price)
+    finance_keywords = (
+        "stock", "stocks", "share", "market", "ipo", "earnings", "revenue",
+        "investment", "finance", "financial", "company performance", "dividend",
+        "guidance", "crypto", "bitcoin", "ethereum", "nasdaq", "dow", "s&p",
+        "bse", "nse", "ticker", "company", "index", "mutual fund", "bond"
+    )
+    if any(k in t for k in finance_keywords):
+        return "finance"
+
+    # 💰 Price / Shopping / Products (secondary)
+    price_keywords = (
+        "price", "cost", "how much", "₹", "$", "buy", "deal", "offer", "discount",
+        "coupon", "shopping", "product", "specs", "compare", "vs", "review",
+        "order", "under $", "under ₹", "cheap", "sale", "wishlist"
+    )
+    if any(k in t for k in price_keywords):
+        # detect if it's a stock/company context (contains finance hints)
+        if any(k in t for k in finance_keywords):
+            return "finance"
         return "price"
 
     # 🏟 Sports
     if any(k in t for k in (
-        "stats", "box score", "boxscore", "score", "final score",
-        "match", "game", "result", "record"
+        "score", "match", "fixture", "result", "standings", "odds", "game",
+        "final score", "box score", "stats", "player", "team", "highlights"
     )):
         return "sports"
 
-    # 📊 Finance
+    # 📰 News / Media
     if any(k in t for k in (
-        "earnings", "guidance", "revenue", "q1", "q2", "q3", "q4",
-        "ipo", "downgrade", "upgrade", "stock price", "share price"
+        "news", "headline", "update", "latest", "breaking", "article", "press release"
     )):
-        return "finance"
-
-    # 📰 News
-    if any(k in t for k in ("news", "headline", "breaking", "update", "latest")):
         return "news"
 
-    # 🌐 Fallback
-    return "search"
+    # 💼 Networking / Startup / Tech Events (comes BEFORE 'activities')
+    if any(k in t for k in (
+        "startup", "founder", "networking", "meetup", "conference", "summit",
+        "luma", "eventbrite", "demo day", "pitch", "accelerator", "vc",
+        "entrepreneur", "tech event", "product meetup"
+    )):
+        return "networking"
 
+    # 🍽 Food / Restaurants / Cafes
+    if any(k in t for k in (
+        "restaurant", "restaurants", "food", "cuisine", "eat", "brunch", "lunch",
+        "dinner", "bar", "coffee", "cafe", "bistro", "bakery", "dessert", "menu"
+    )):
+        return "food"
+
+    # 🎟 Events / Activities / Things to Do
+    if any(k in t for k in (
+        "things to do", "activities", "events", "places to visit", "hangouts",
+        "what to do", "classes", "workshops", "experiences"
+    )):
+        return "activities"
+
+    # 🌄 Outdoors / Nature / Hiking
+    if any(k in t for k in (
+        "trail", "trails", "hike", "hiking", "walk", "walking", "run", "park",
+        "beach", "outdoor", "nature", "scenic", "camping", "cycling", "picnic"
+    )):
+        return "outdoors"
+
+    # 🌃 Nightlife / Entertainment
+    if any(k in t for k in (
+        "club", "nightlife", "party", "bar", "pub", "dj", "concert", "live music",
+        "karaoke", "standup", "festival", "gig"
+    )):
+        return "nightlife"
+
+    # 🔥 Trending / Viral / Social
+    if any(k in t for k in (
+        "trending", "viral", "popular", "new", "latest trends", "buzzing",
+        "instagram", "tiktok", "youtube", "reel", "social media"
+    )):
+        return "trending"
+
+    # 🧠 Default
+    return "search"
 
 
 def intent_trust_weight(host: str, intent: str, query: str = "") -> int:
@@ -250,6 +306,156 @@ def score_link(title: str, url: str, target_date, intent: str) -> float:
         recency = 1
 
     return trust * 12 + page * 4 + recency + penalty
+
+def extract_city(text: str) -> str:
+    """
+    Infer a city from the query or user location.
+    Falls back to approximate location via IP if 'near me' detected.
+    """
+    t = (text or "").lower()
+    city_match = re.search(r"in\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)", text)
+    if city_match:
+        return city_match.group(1)
+
+    if "near me" in t or "around me" in t or "nearby" in t:
+        try:
+            g = geocoder.ip('me')
+            if g.city:
+                return g.city
+        except Exception:
+            pass
+    return None
+
+def expand_query(intent: str, query: str = "") -> str:
+    """
+    Expand search queries with high-signal keywords tuned to both intent and time context.
+    Automatically treats 'near me' as same-day context.
+    """
+    q = (query or "").lower()
+    expansions = []
+
+    # ----------------------------
+    # 1️⃣ Time Context Awareness
+    # ----------------------------
+    if any(k in q for k in ("today", "tonight", "near me", "around me", "nearby")):
+        time_focus = "today"
+        time_terms = [
+            "today", "tonight", "happening now", "open now",
+            "ongoing events", "today's schedule", "places open today"
+        ]
+    elif any(k in q for k in ("tomorrow", "tmrw")):
+        time_focus = "tomorrow"
+        time_terms = [
+            "tomorrow", "tomorrow night", "upcoming tomorrow", "book for tomorrow"
+        ]
+    elif "weekend" in q:
+        time_focus = "weekend"
+        time_terms = [
+            "this weekend", "weekend events", "Saturday", "Sunday",
+            "festivals", "markets", "live music", "sports events"
+        ]
+    else:
+        time_focus = "week"
+        time_terms = [
+            "this week", "events this week", "weekly lineup",
+            "upcoming events", "trending places this week"
+        ]
+
+    # ----------------------------
+    # 2️⃣ Intent-Specific Keywords
+    # ----------------------------
+
+    if intent in ("networking", "startup", "conference", "meetup"):
+        expansions += [
+            "startup events near me", "tech meetups", "founder networking", "Luma",
+            "Eventbrite",  "Meetup", "TechCrunch events", "LinkedIn Local",
+            "accelerator demo day", "pitch competitions", "innovation summits"
+        ]
+
+
+    elif intent in ("activities", "outdoors", "weekend"):
+        expansions += [
+            "things to do", "local activities", "TripAdvisor", "Luma", "Eventbrite",
+            "Meetup", "TimeOut events", "guided tours", "unique experiences"
+        ]
+        if any(k in q for k in ("hike", "trail", "walk", "park", "beach")):
+            expansions += ["best hiking trails", "nature walks", "AllTrails", "parks near me"]
+        if any(k in q for k in ("concert", "music")):
+            expansions += ["concerts near me", "live music", "Ticketmaster", "Bandsintown"]
+        if any(k in q for k in ("sports", "match", "game")):
+            expansions += ["sports events", "NBA", "cricket", "football", "ESPN", "StubHub"]
+        if any(k in q for k in ("comedy", "show", "theatre", "musical")):
+            expansions += ["comedy shows", "standup comedy", "plays", "Eventbrite comedy"]
+        if any(k in q for k in ("art", "exhibition", "museum")):
+            expansions += ["art exhibitions", "gallery shows", "museum events", "TimeOut art"]
+        if any(k in q for k in ("food", "restaurant", "market")):
+            expansions += ["food festivals", "pop-up markets", "street food events"]
+
+    elif intent in ("restaurant", "food"):
+        expansions += [
+            "top restaurants", "cafes", "Yelp", "Zomato", "Eater", "OpenTable",
+            "new openings", "trending dining", "TimeOut food", "Michelin Guide"
+        ]
+
+    elif intent == "nightlife":
+        expansions += [
+            "bars", "clubs", "live DJs", "rooftop lounges", "karaoke",
+            "night events", "TimeOut nightlife", "concerts tonight"
+        ]
+
+    elif intent == "trending":
+        expansions += [
+            "trending spots", "viral", "popular now", "new openings",
+            "TikTok", "Instagram trends", "buzzing places"
+        ]
+
+    elif intent in ("finance", "price"):
+        # auto-detect finance vs retail based on query content
+        finance_hints = [
+            "stock", "share", "market", "ipo", "earnings", "dividend",
+            "nasdaq", "dow", "s&p", "company", "revenue", "guidance",
+            "financial", "invest", "crypto", "trading"
+        ]
+        retail_hints = [
+            "buy", "order", "deal", "discount", "coupon", "shopping",
+            "amazon", "flipkart", "walmart", "target", "costco",
+            "best buy", "specs", "product", "laptop", "phone", "watch"
+        ]
+
+        is_finance_query = any(k in q for k in finance_hints) and not any(k in q for k in retail_hints)
+
+        if is_finance_query:
+            expansions += [
+                "stock price", "share price", "market update", "latest earnings",
+                "Bloomberg", "CNBC", "Reuters finance", "Nasdaq", "Yahoo Finance",
+                "company performance", "Q4 2025 results", "financial outlook"
+            ]
+        else:
+            current_year = datetime.now().year
+            expansions += [
+                "current price", "latest model", "buy online", "available now",
+                "new release", f"{current_year}", f"{current_year} model",
+                "official site", "authentic product", "launch edition",
+                "user ratings", "specifications", "compare Amazon Flipkart"
+            ]
+            trusted_retailers = ["Amazon", "Flipkart", "Apple", "Target", "Costco", "B&H", "Reliance Digital"]
+            expansions += trusted_retailers
+
+
+    # ----------------------------
+    # 3️⃣ Combine & Clean
+    # ----------------------------
+    if intent in (
+        "activities", "outdoors", "weekend", "food", "restaurant",
+        "nightlife", "trending", "networking", "startup", "conference", "meetup"
+    ):
+        combined = time_terms + list(dict.fromkeys(expansions))
+    else:
+        combined = list(dict.fromkeys(expansions))
+
+    return " ".join(combined)
+
+
 
 
 __all__ = [
