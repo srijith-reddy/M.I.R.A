@@ -1,7 +1,8 @@
 # ======================================
 # mira/agents/planner_agent.py  (smart city & trail discovery)
 # ======================================
-import asyncio, os, re, base64, brotli, zlib, inflect, requests
+import asyncio, os, re, base64, zlib, inflect, requests
+import brotlicffi as brotli
 from time import time
 from datetime import datetime
 from typing import Dict, Any, Optional, List
@@ -16,6 +17,7 @@ from mira.core import domain_trust
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 import shutil
+
 _engine = inflect.engine()
 
 
@@ -26,6 +28,12 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
+# ======================================================
+# 🔹 GLOBALS
+# ======================================================
+PROFILE_DIR = "/Users/shrey24/Desktop/mira-browser-profiles/planner"  # shared persistent cookies
+PLAYWRIGHT_LOCK = asyncio.Lock()
+
 # ======================================================================
 # MAIN AGENT
 # ======================================================================
@@ -33,49 +41,78 @@ class PlannerAgent:
     def __init__(self, headless: bool = False, max_tabs: int = 4):
         self.headless = headless
         self.max_tabs = max_tabs
-        self.browser_session = None
+        self.browser_session: Optional[BrowserSession] = None
         self._started = False
         self._pw = None
         self._pw_context = None
 
         try:
             self.llm_facts = ChatOpenAI(model="gpt-4o", temperature=0.1, max_tokens=800)
-            print("✅ [DEBUG] PlannerAgent LLM initialized (GPT-4o).")
+            print("✅ [DEBUG] LLM initialized for PlannerAgent.")
         except Exception as e:
             logger.log_error(e, context="PlannerAgent.llm_init")
             self.llm_facts = None
 
     # ======================================================
-    # 🔹 Persistent Playwright setup
+    # 🔹 Safe Playwright management (shared profile)
     # ======================================================
     async def _ensure_playwright(self):
-        if self._pw_context:
-            return
-        try:
-            self._pw = await async_playwright().start()
-            self._pw_context = await self._pw.chromium.launch_persistent_context(
-                user_data_dir="/tmp/mira_pw_planner",
-                headless=self.headless,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            print("✅ [DEBUG] Playwright persistent context ready for PlannerAgent.")
-        except Exception as e:
-            if "ProcessSingleton" in str(e):
-                print("⚠️ [PlannerAgent] Detected locked Chrome profile — cleaning /tmp/mira_pw_planner...")
+        async with PLAYWRIGHT_LOCK:
+            # 🧠 Close BrowserUse first if it’s active
+            if self._started:
+                print("🕐 [PlannerAgent] Closing BrowserUse before Playwright starts...")
                 try:
-                    shutil.rmtree("/tmp/mira_pw_planner", ignore_errors=True)
+                    await self.browser_session.stop()
+                except Exception:
+                    pass
+                self._started = False
+
+            # 🧹 Remove only stale lock file (avoid process kill)
+            lock_file = os.path.join(PROFILE_DIR, "SingletonLock")
+            if os.path.exists(lock_file):
+                print("🧹 [PlannerAgent] Removing stale Chrome lock...")
+                try:
+                    os.remove(lock_file)
+                except Exception:
+                    pass
+
+            if self._pw_context:
+                print("♻️ [PlannerAgent] Reusing existing Playwright context.")
+                return
+
+            try:
+                self._pw = await async_playwright().start()
+                self._pw_context = await self._pw.chromium.launch_persistent_context(
+                    user_data_dir=PROFILE_DIR,
+                    headless=self.headless,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-dev-shm-usage",
+                    ],
+                )
+                print(f"✅ [DEBUG] Playwright context launched using shared profile: {PROFILE_DIR}")
+
+            except Exception as e:
+                # 🧩 Handle stale lock after crash
+                if "ProcessSingleton" in str(e):
+                    print("⚠️ [PlannerAgent] Chrome profile locked — cleaning and retrying...")
+                    shutil.rmtree(PROFILE_DIR, ignore_errors=True)
                     self._pw_context = await self._pw.chromium.launch_persistent_context(
-                        user_data_dir="/tmp/mira_pw_planner",
+                        user_data_dir=PROFILE_DIR,
                         headless=self.headless,
+                        args=[
+                            "--no-sandbox",
+                            "--disable-setuid-sandbox",
+                            "--disable-blink-features=AutomationControlled",
+                            "--disable-dev-shm-usage",
+                        ],
                     )
-                except Exception as e2:
-                    logger.log_error(e2, context="PlannerAgent._ensure_playwright.retry_fail")
-    
+                    print("✅ [DEBUG] Relaunched clean persistent Playwright context.")
+                else:
+                    logger.log_error(e, context="PlannerAgent._ensure_playwright")
+
     async def close_playwright(self):
         if self._pw_context:
             await self._pw_context.close()
@@ -83,34 +120,22 @@ class PlannerAgent:
         if self._pw:
             await self._pw.stop()
             self._pw = None
-        print("🧹 [DEBUG] Closed PlannerAgent Playwright context.")
+        print("🧹 [DEBUG] Closed Playwright context for PlannerAgent.")
 
     # ======================================================
-    # 🔹 Browser-use session (optional)
+    # 🔹 BrowserUse (shared cookie storage)
     # ======================================================
     async def _ensure_browser_use(self):
         if not self.browser_session or not self._started:
-            try:
-                self.browser_session = BrowserSession(
-                    headless=False,
-                    user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116 Safari/537.36")
-                )
-                await self.browser_session.start()
-                self._started = True
-                logger.log_info("Browser session initialized", context="BrowserAgent")
-
-                try:
-                    tabs = await self.browser_session.list_tabs()
-                    for t in tabs:
-                        current_url = (await self.browser_session.get_tab_url(t)) or ""
-                        if current_url.strip() in ("", "about:blank"):
-                            await self.browser_session.close_tab(t)
-                            print("🧹 [DEBUG] Closed BrowserUse blank starter tab.")
-                except Exception as te:
-                    logger.log_error(te, context="BrowserAgent._ensure_browser_use.cleanup_tabs")
-            except Exception as e:
-                logger.log_error(e, context="BrowserAgent._ensure_browser_use")
+            self.browser_session = BrowserSession(
+                headless=self.headless,
+                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116 Safari/537.36"),
+                user_data_dir=PROFILE_DIR,  # same folder for shared cookies
+            )
+            await self.browser_session.start()
+            self._started = True
+            print(f"✅ [DEBUG] BrowserUse session started using profile: {PROFILE_DIR}")
 
     async def browser_use_get(self, url: str) -> str:
         await self._ensure_browser_use()
@@ -120,18 +145,8 @@ class PlannerAgent:
             title = await self.browser_session.get_current_page_title()
             return f"<title>{title}</title> {html}"
         except Exception as e:
-            logger.log_error(e, context="BrowserAgent.browser_use_get (retry)")
-            try:
-                await self.browser_session.stop()
-                self._started = False
-                await self._ensure_browser_use()
-                await self.browser_session.navigate_to(url)
-                html = await self.browser_session.get_current_page_url()
-                title = await self.browser_session.get_current_page_title()
-                return f"<title>{title}</title> {html}"
-            except Exception as e2:
-                logger.log_error(e2, context="BrowserAgent.browser_use_get.final_fail")
-                return ""
+            logger.log_error(e, context="PlannerAgent.browser_use_get")
+            return ""
 
     # ======================================================
     # 🔹 Core scrapers
@@ -149,32 +164,30 @@ class PlannerAgent:
 
     def _scrape_with_requests(self, url: str) -> str:
         try:
-            resp = requests.get(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/116 Safari/537.36",
-                    "Accept-Encoding": "gzip, deflate, br",
-                },
-                timeout=12,
-            )
-            if not resp.ok:
-                return ""
-            return self._decode_body(resp)
+            session = requests.Session()
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/116 Safari/537.36",
+                "Accept-Encoding": "gzip, deflate, br",
+            })
+            resp = session.get(url, timeout=15)
+            resp.raise_for_status()
+            # ✅ Let requests handle Brotli internally
+            return resp.text
         except Exception as e:
             logger.log_error(e, context="BrowserAgent._scrape_with_requests")
             return ""
 
     def _scrape_with_scrapy(self, url: str) -> str:
         try:
-            headers = {
+            session = requests.Session()
+            session.headers.update({
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/116 Safari/537.36",
                 "Accept-Encoding": "gzip, deflate, br",
-            }
-            resp = requests.get(url, timeout=12, headers=headers)
-            if not resp.ok:
-                return ""
-            body = self._decode_body(resp)
-            response = HtmlResponse(url=url, body=body, encoding="utf-8")
+            })
+            resp = session.get(url, timeout=15)
+            resp.raise_for_status()
+            # ✅ No manual decoding
+            response = HtmlResponse(url=url, body=resp.text, encoding="utf-8")
             return Selector(response).get()
         except Exception as e:
             logger.log_error(e, context="BrowserAgent._scrape_with_scrapy")
@@ -206,46 +219,34 @@ class PlannerAgent:
             return ""
 
     # ======================================================
-    # 🔹 Playwright scrape (persistent reuse)
+    # 🔹 Playwright scraper (safe shared profile)
     # ======================================================
-    async def _scrape_with_playwright(self, url: str, intent: Optional[str] = None, capture: bool = False):
-        """Scrape a page using a shared persistent Playwright context."""
-        await self._ensure_playwright()  # ensures persistent browser exists
+    async def _scrape_with_playwright(self, url: str, capture: bool = False):
+        await self._ensure_playwright()
         screenshot_path = None
         page = None
-
         try:
-            # 🧩 Create a new tab in the shared context
             page = await self._pw_context.new_page()
             await page.goto(url, timeout=45000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(4000)
 
-            # 🕐 Wait depending on site type
-            extra_wait = 10000 if intent in ("sports", "finance") else 6000
-            await page.wait_for_timeout(extra_wait)
-
-            # 📜 Scroll to trigger lazy loading
             for _ in range(3):
                 await page.evaluate("window.scrollBy(0, window.innerHeight)")
                 await page.wait_for_timeout(1000)
 
-            # 📸 Capture full page if needed
             if capture:
-                base_dir = "/Volumes/HDD-1/mira_screens"
+                base_dir = "/Users/shrey24/Desktop/mira_screens/planner"
                 os.makedirs(base_dir, exist_ok=True)
-                base_path = os.path.join(base_dir, f"mira_{int(time())}")
+                base_path = os.path.join(base_dir, f"planner_{int(time())}")
                 screenshot_path = await self._scroll_and_capture_full_page(page, base_path)
-                print(f"✅ [DEBUG] Full-page screenshot captured: {screenshot_path}")
 
             html = await page.content()
             print(f"✅ [DEBUG] Scraped successfully: {url}")
             return html or "", screenshot_path
-
         except Exception as e:
-            logger.log_error(e, context=f"BrowserAgent._scrape_with_playwright ({url})")
+            logger.log_error(e, context=f"PlannerAgent._scrape_with_playwright ({url})")
             return "", None
-
         finally:
-            # 🧹 Only close the tab, not the entire context
             if page:
                 try:
                     await page.close()
@@ -259,8 +260,10 @@ class PlannerAgent:
         try:
             if stateful:
                 await self.browser_use_get(url)
+                await self.browser_session.stop()
+                self._started = False
 
-            html, screenshot_path = await self._scrape_with_playwright(url, intent=intent, capture=capture)
+            html, screenshot_path = await self._scrape_with_playwright(url, capture=capture)
             if html and len(html) > 1000:
                 return html, screenshot_path
 
@@ -274,7 +277,7 @@ class PlannerAgent:
 
             return html, screenshot_path
         except Exception as e:
-            logger.log_error(e, context="BrowserAgent._scrape_page")
+            logger.log_error(e, context="PlannerAgent._scrape_page")
             return "", None
         
     # ======================================================
@@ -489,7 +492,6 @@ class PlannerAgent:
             "summary": summary
         }
 
-    
     # ======================================================
     # 🔹 Unified handler
     # ======================================================

@@ -1,7 +1,8 @@
 # ======================================
-# mira/agents/buying_agent.py  (enhanced full-page + GPT-4o summarization)
+# mira/agents/buying_agent.py  (Hybrid-safe Playwright + BrowserUse + GPT-4o summarization)
 # ======================================
-import asyncio, os, re, base64, brotli, zlib, requests
+import asyncio, os, re, base64, zlib, requests, shutil, psutil
+import brotlicffi as brotli
 from datetime import datetime
 from time import time
 from urllib.parse import quote
@@ -16,7 +17,12 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from mira.utils import logger
 from mira.core import domain_trust
 from mira.core.config import cfg
-import shutil
+
+# ======================================================
+# 🔹 GLOBALS
+# ======================================================
+PROFILE_DIR = "/Users/shrey24/Desktop/mira-browser-profiles/buying"  # persistent shared cookies
+PLAYWRIGHT_LOCK = asyncio.Lock()
 
 # ======================================================================
 # MAIN AGENT
@@ -37,36 +43,50 @@ class BuyingAgent:
             logger.log_error(e, context="BuyingAgent.llm_init")
             self.llm_facts = None
 
-
-
-
-# ======================================================
-# 🔹 Persistent Playwright management (resilient)
-# ======================================================
+    # ======================================================
+    # 🔹 Safe Playwright management (with profile sharing)
+    # ======================================================
     async def _ensure_playwright(self):
-        if self._pw_context:
-            return
-        try:
-            self._pw = await async_playwright().start()
-            self._pw_context = await self._pw.chromium.launch_persistent_context(
-                user_data_dir="/tmp/mira_pw_buying",
-                headless=self.headless,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            print("✅ [DEBUG] Persistent Playwright context ready for BuyingAgent.")
-        except Exception as e:
-            # handle Chrome profile lock issue
-            if "ProcessSingleton" in str(e):
-                print("⚠️ [BuyingAgent] Detected locked Chrome profile — cleaning /tmp/mira_pw_buying...")
+        async with PLAYWRIGHT_LOCK:
+            # 🧠 If BrowserUse still active → close it before Playwright starts
+            if self._started:
+                print("🕐 [BuyingAgent] Waiting for BrowserUse to close before Playwright starts...")
+                await self.browser_session.stop()
+                self._started = False
+
+            # ✅ Clean only stale lock files (not running processes)
+            lock_file = os.path.join(PROFILE_DIR, "SingletonLock")
+            if os.path.exists(lock_file):
+                print("🧹 [BuyingAgent] Removing stale Chrome lock...")
                 try:
-                    shutil.rmtree("/tmp/mira_pw_buying", ignore_errors=True)
+                    os.remove(lock_file)
+                except Exception:
+                    pass
+
+            if self._pw_context:
+                return  # already running
+
+            try:
+                self._pw = await async_playwright().start()
+                self._pw_context = await self._pw.chromium.launch_persistent_context(
+                    user_data_dir=PROFILE_DIR,
+                    headless=self.headless,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-dev-shm-usage",
+                    ],
+                )
+                print(f"✅ [DEBUG] Playwright context launched using shared profile: {PROFILE_DIR}")
+
+            except Exception as e:
+                # 🧩 Handle locked profile (rare, after crash)
+                if "ProcessSingleton" in str(e):
+                    print("⚠️ [BuyingAgent] Chrome profile locked — cleaning and retrying...")
+                    shutil.rmtree(PROFILE_DIR, ignore_errors=True)
                     self._pw_context = await self._pw.chromium.launch_persistent_context(
-                        user_data_dir="/tmp/mira_pw_buying",
+                        user_data_dir=PROFILE_DIR,
                         headless=self.headless,
                         args=[
                             "--no-sandbox",
@@ -75,11 +95,10 @@ class BuyingAgent:
                             "--disable-dev-shm-usage",
                         ],
                     )
-                    print("✅ [DEBUG] Relaunched clean persistent context for BuyingAgent.")
-                except Exception as e2:
-                    logger.log_error(e2, context="BuyingAgent._ensure_playwright.retry_fail")
-            else:
-                logger.log_error(e, context="BuyingAgent._ensure_playwright")
+                    print("✅ [DEBUG] Relaunched clean persistent Playwright context.")
+                else:
+                    logger.log_error(e, context="BuyingAgent._ensure_playwright")
+
 
     async def close_playwright(self):
         if self._pw_context:
@@ -91,19 +110,20 @@ class BuyingAgent:
         print("🧹 [DEBUG] Closed Playwright context for BuyingAgent.")
 
     # ======================================================
-    # 🔹 Browser-use (optional)
+    # 🔹 BrowserUse (persistent cookie store)
     # ======================================================
     async def _ensure_browser_use(self):
         if not self.browser_session or not self._started:
             self.browser_session = BrowserSession(
                 headless=self.headless,
                 user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116 Safari/537.36")
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116 Safari/537.36"),
+                user_data_dir=PROFILE_DIR,  # same shared folder
             )
             await self.browser_session.start()
             self._started = True
-            logger.log_info("Browser session initialized", context="BuyingAgent")
-    
+            print(f"✅ [DEBUG] BrowserUse session started using profile: {PROFILE_DIR}")
+
     async def browser_use_get(self, url: str) -> str:
         await self._ensure_browser_use()
         try:
@@ -112,20 +132,11 @@ class BuyingAgent:
             title = await self.browser_session.get_current_page_title()
             return f"<title>{title}</title> {html}"
         except Exception as e:
-            logger.log_error(e, context="BrowserAgent.browser_use_get (retry)")
-            try:
-                await self.browser_session.stop()
-                self._started = False
-                await self._ensure_browser_use()
-                await self.browser_session.navigate_to(url)
-                html = await self.browser_session.get_current_page_url()
-                title = await self.browser_session.get_current_page_title()
-                return f"<title>{title}</title> {html}"
-            except Exception as e2:
-                logger.log_error(e2, context="BrowserAgent.browser_use_get.final_fail")
-                return ""
+            logger.log_error(e, context="BuyingAgent.browser_use_get")
+            return ""
+
     # ======================================================
-    # 🔹 Request & Scrapy fallbacks
+    # 🔹 Requests + Scrapy fallback
     # ======================================================
     def _decode_body(self, resp: requests.Response) -> str:
         try:
@@ -140,11 +151,7 @@ class BuyingAgent:
 
     def _scrape_with_requests(self, url: str) -> str:
         try:
-            resp = requests.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/116 Safari/537.36"},
-                timeout=12,
-            )
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
             if not resp.ok:
                 return ""
             return self._decode_body(resp)
@@ -154,8 +161,7 @@ class BuyingAgent:
 
     def _scrape_with_scrapy(self, url: str) -> str:
         try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            resp = requests.get(url, headers=headers, timeout=12)
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
             if not resp.ok:
                 return ""
             body = self._decode_body(resp)
@@ -166,7 +172,7 @@ class BuyingAgent:
             return ""
 
     # ======================================================
-    # 🔹 Scroll + full-page capture
+    # 🔹 Scroll + capture
     # ======================================================
     async def _scroll_and_capture_full_page(self, page, base_path: str) -> str:
         stitched_path = f"{base_path}_stitched.png"
@@ -191,7 +197,7 @@ class BuyingAgent:
             return ""
 
     # ======================================================
-    # 🔹 Playwright scraper (persistent reuse)
+    # 🔹 Playwright scraper (safe shared profile)
     # ======================================================
     async def _scrape_with_playwright(self, url: str, capture: bool = False):
         await self._ensure_playwright()
@@ -200,14 +206,14 @@ class BuyingAgent:
         try:
             page = await self._pw_context.new_page()
             await page.goto(url, timeout=45000, wait_until="domcontentloaded")
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(3000)
 
             for _ in range(3):
                 await page.evaluate("window.scrollBy(0, window.innerHeight)")
-                await page.wait_for_timeout(1000)
+                await page.wait_for_timeout(800)
 
             if capture:
-                base_dir = "/Volumes/HDD-1/mira_screens/buying"
+                base_dir = "/Users/shrey24/Desktop/mira_screens/buying"
                 os.makedirs(base_dir, exist_ok=True)
                 base_path = os.path.join(base_dir, f"buying_{int(time())}")
                 screenshot_path = await self._scroll_and_capture_full_page(page, base_path)
@@ -232,6 +238,8 @@ class BuyingAgent:
         try:
             if stateful:
                 await self.browser_use_get(url)
+                await self.browser_session.stop()
+                self._started = False
 
             html, screenshot_path = await self._scrape_with_playwright(url, capture=capture)
             if html and len(html) > 1000:

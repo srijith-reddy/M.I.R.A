@@ -2,7 +2,11 @@ import re
 import subprocess
 import calendar
 from datetime import datetime, timedelta
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple
+import threading
+
+from Foundation import NSDate
+import EventKit
 
 
 class MacCalendarAgent:
@@ -10,152 +14,201 @@ class MacCalendarAgent:
     # Helpers
     # ---------------------------------------------------------
     def _split_prompt(self, prompt: str) -> Tuple[str, str]:
-        """Extract time-related part and leftover (for title)."""
         text = prompt.lower()
-
         time_patterns = [
-            r"(next\s+\w+\s+at\s+\d{1,2}(:\d{2})?\s*(am|pm))",
-            r"(tomorrow\s+at\s+\d{1,2}(:\d{2})?\s*(am|pm))",
-            r"(\b\d{1,2}(:\d{2})?\s*(am|pm)\b)",
-            r"(today\s+at\s+\d{1,2}(:\d{2})?\s*(am|pm)?)",
-            r"(next\s+\w+)",
-            r"(tomorrow)",
-            r"(today)",
-            r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
+            r"\b(on|this|next)?\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b(\s+at\s+\d{1,2}([:.]\d{2})?\s*(a\.?m\.?|p\.?m\.?)?)?",
+            r"\b(tomorrow|today)\b(\s+at\s+\d{1,2}([:.]\d{2})?\s*(a\.?m\.?|p\.?m\.?)?)?",
+            r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(\s+at\s+\d{1,2}([:.]\d{2})?\s*(a\.?m\.?|p\.?m\.?)?)?",
+            r"\b\d{1,2}/\d{1,2}(\s+at\s+\d{1,2}([:.]\d{2})?\s*(a\.?m\.?|p\.?m\.?)?)?",
+            r"\b\d{1,2}([:.]\d{2})?\s*(a\.?m\.?|p\.?m\.?)?\b"
         ]
-
         time_str = ""
         for pat in time_patterns:
             m = re.search(pat, text)
-            if m and not time_str:  # keep first match for datetime parsing
+            if m:
                 time_str = m.group(0)
-            # remove *all* matches from the leftover
-            text = re.sub(pat, "", text)
-
+                break
+        if time_str:
+            text = text.replace(time_str, "", 1)
         return time_str.strip(), text.strip()
 
     @staticmethod
     def _extract_title(text: str) -> str:
         fillers = [
-            "could you add an event", "could you add", "add an event",
-            "add that to my calendar", "that to my calendar",
-            "add this to my calendar", "to my calendar",
+            "could you add an event", "could you add", "could you", "can you add",
+            "can you", "would you", "add an event", "add that to my calendar",
+            "add this to my calendar", "that to my calendar", "to my calendar",
             "to my computer calendar", "to my computer", "on my calendar",
-            "schedule", "please", "thank you", "can you add",
-            "i have", "i've got", "saying that"
+            "schedule", "please", "thank you", "i have", "i've got", "saying that"
         ]
-
         clean = text.lower()
         for f in fillers:
             clean = clean.replace(f, "")
 
-        # strip "at 5pm", "at 10:30 am", etc.
-        clean = re.sub(r"\bat\s+\d{1,2}(:\d{2})?\s*(am|pm|o'clock)?", "", clean)
-
-        # strip dangling am/pm
-        clean = re.sub(r"\b(am|pm)\b", "", clean)
-
-        # strip stray punctuation
-        clean = re.sub(r"[?.!]+", " ", clean)
-
-        # normalize spaces
+        # Remove linking verbs and common prepositions
+        clean = re.sub(r"\b(is|was|were|will be|am|are|at|on|by|around|about|for)\b", "", clean)
+        clean = re.sub(r"\d{1,2}([:.]\d{2})?\s*(a\.?m\.?|p\.?m\.?)?", "", clean)
+        clean = re.sub(r"[?.!,]+", " ", clean)
         clean = re.sub(r"\s+", " ", clean).strip()
-
         return clean.title() if clean else "Untitled"
 
+    # ---------------------------------------------------------
+    # Date/Time Parser
+    # ---------------------------------------------------------
     def _parse_datetime(self, time_str: str) -> Tuple[datetime, datetime]:
         now = datetime.now()
         base = now
-        text = (time_str or "").lower()
+        text = (time_str or "").lower().strip()
 
-        # Handle "tomorrow"
+        # ✅ Normalize dots and am/pm forms
+        text = re.sub(r"\.", ":", text)              # 7.15 → 7:15
+        text = re.sub(r"p\.?m\.?", "pm", text)
+        text = re.sub(r"a\.?m\.?", "am", text)
+
+        # Parse absolute month-day
+        absolute_patterns = ["%B %d", "%b %d", "%m/%d", "%d/%m"]
+        for pat in absolute_patterns:
+            try:
+                parsed = datetime.strptime(re.sub(r"(\d)(st|nd|rd|th)", r"\1", text), pat)
+                base = parsed.replace(year=now.year)
+                break
+            except ValueError:
+                continue
+
+        # Relative keywords
         if "tomorrow" in text:
             base = now + timedelta(days=1)
+        elif "today" in text:
+            base = now
 
-        # Handle weekdays
+        # Day-of-week
         for i, day in enumerate(calendar.day_name):
-            day_lower = day.lower()
-            if f"next {day_lower}" in text or day_lower in text:
+            if re.search(rf"\b(on|this|next)?\s*{day.lower()}\b", text):
                 days_ahead = (i - now.weekday() + 7) % 7
-                if days_ahead == 0:
-                    days_ahead = 7
+                if "next" in text:
+                    days_ahead += 7
                 base = now + timedelta(days=days_ahead)
                 break
 
-        # Match times
+        # Time parsing
         match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
-        if not match:
-            start = datetime.combine(base.date(), datetime.min.time()).replace(hour=9)
-            end = start + timedelta(hours=1)
-            return start, end
+        if match:
+            hour = int(match.group(1))
+            minute = int(match.group(2) or 0)
+            ampm = match.group(3)
+            if ampm:
+                if ampm == "pm" and hour < 12:
+                    hour += 12
+                elif ampm == "am" and hour == 12:
+                    hour = 0
+        else:
+            hour, minute = 9, 0
 
-        hour = int(match.group(1))
-        minute = int(match.group(2) or 0)
-        ampm = match.group(3)
-
-        if ampm and "pm" in ampm and hour < 12:
-            hour += 12
-        if ampm and "am" in ampm and hour == 12:
-            hour = 0
-
-        start = datetime.combine(base.date(), datetime.min.time()).replace(hour=hour, minute=minute)
+        start = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
         end = start + timedelta(hours=1)
         return start, end
 
     # ---------------------------------------------------------
-    # AppleScript wrappers
+    # AppleScript add_event (write)
     # ---------------------------------------------------------
     def add_event(self, title: str, start_dt: datetime, end_dt: datetime, calendar: str = "Home") -> Dict[str, Any]:
-        start_str = start_dt.strftime("%d %B %Y %H:%M:%S")
-        end_str   = end_dt.strftime("%d %B %Y %H:%M:%S")
+        title = title.replace('"', "'")
+        start_ts = int(start_dt.timestamp())
+        end_ts   = int(end_dt.timestamp())
 
+        # AppleScript builds date objects directly from epoch seconds
         script = f'''
+        set startDate to (current date) + ({start_ts} - (do shell script "date +%s") as integer)
+        set endDate   to (current date) + ({end_ts} - (do shell script "date +%s") as integer)
         tell application "Calendar"
+            if not (exists calendar "{calendar}") then
+                make new calendar with properties {{name:"{calendar}"}}
+            end if
             tell calendar "{calendar}"
-                set startDate to date "{start_str}"
-                set endDate to date "{end_str}"
                 make new event at end with properties {{summary:"{title}", start date:startDate, end date:endDate}}
             end tell
         end tell
         '''
+
         try:
             subprocess.run(["osascript", "-e", script], check=True)
             return {"status": "added", "event": title, "calendar": calendar}
+        except subprocess.CalledProcessError as e:
+            return {"status": "error", "error": e.stderr.decode() if e.stderr else str(e)}
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    def list_day(self, day: datetime, calendar: str = "Home") -> Dict[str, Any]:
-        """List events for a specific date."""
-        start_str = day.strftime("%d %B %Y 00:00:00")
-        end_str   = (day + timedelta(days=1)).strftime("%d %B %Y 00:00:00")
 
-        script = f'''
-        tell application "Calendar"
-            tell calendar "{calendar}"
-                set dayStart to date "{start_str}"
-                set dayEnd to date "{end_str}"
-                set dayEvents to (every event whose start date ≥ dayStart and start date < dayEnd)
-                set output to ""
-                repeat with e in dayEvents
-                    set output to output & (summary of e) & " at " & (start date of e as string) & linefeed
-                end repeat
-                return output
-            end tell
-        end tell
-        '''
-        try:
-            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=True)
-            events = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-            return {"status": "ok", "events": events}
-        except Exception as e:
-            return {"status": "error", "error": str(e)}
+    # ---------------------------------------------------------
+    # EventKit read (list_day & list_upcoming)
+    # ---------------------------------------------------------
+    def _to_nsdate(self, py_date: datetime):
+        return NSDate.dateWithTimeIntervalSince1970_(py_date.timestamp())
+
+    def _fetch_events(self, start: datetime, end: datetime):
+        store = EventKit.EKEventStore.alloc().init()
+        granted = []
+        access_done = threading.Event()
+
+        def _handler(grant, err):
+            granted.append(grant)
+            access_done.set()
+
+        store.requestAccessToEntityType_completion_(EventKit.EKEntityTypeEvent, _handler)
+        access_done.wait()
+
+        if not granted or not granted[0]:
+            return {"status": "error", "error": "Calendar access denied"}
+
+        all_cals = store.calendarsForEntityType_(EventKit.EKEntityTypeEvent)
+        pred = store.predicateForEventsWithStartDate_endDate_calendars_(
+            self._to_nsdate(start),
+            self._to_nsdate(end),
+            all_cals
+        )
+
+        events = store.eventsMatchingPredicate_(pred)
+        if not events:
+            return {"status": "ok", "events": ["You're free today!"]}
+
+        events_out = []
+        for e in events:
+            if getattr(e, "isDetached", lambda: False)() or getattr(e, "isCancelled", False):
+                continue
+            title = e.title() or "(no title)"
+            start_time = e.startDate()
+            events_out.append(f"{title} at {start_time}")
+        return {"status": "ok", "events": events_out or ["No events found"]}
+
+    def list_day(self, day: datetime) -> Dict[str, Any]:
+        start = datetime(day.year, day.month, day.day)
+        end = start + timedelta(days=1)
+        return self._fetch_events(start, end)
+
+    def list_upcoming(self, days_ahead: int = 7) -> Dict[str, Any]:
+        start = datetime.now()
+        end = start + timedelta(days=days_ahead)
+        return self._fetch_events(start, end)
 
     # ---------------------------------------------------------
     # Entry point
     # ---------------------------------------------------------
     def handle(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        text = (payload.get("title") or "").lower().strip()
         fn = (payload.get("fn") or "").lower()
 
+        # Infer function if user says "what do I have tomorrow?"
+        if any(k in text for k in ("what do i have", "show me", "list", "schedule", "events", "do i have anything")):
+            if "tomorrow" in text:
+                fn = "day"
+                payload["date"] = datetime.now() + timedelta(days=1)
+            elif any(k in text for k in ("week", "upcoming", "next few days")):
+                fn = "upcoming"
+                payload["days"] = 7
+            else:
+                fn = "today"
+
+        # Add event
         if fn == "add":
             raw_title = payload.get("title", "")
             time_str, title_str = self._split_prompt(raw_title)
@@ -165,14 +218,15 @@ class MacCalendarAgent:
             title = self._extract_title(title_str or raw_title)
             return {"ok": True, **self.add_event(title, start_dt, end_dt, payload.get("calendar", "Home"))}
 
+        # List events
         if fn == "today":
-            return {"ok": True, **self.list_day(datetime.now(), payload.get("calendar", "Home"))}
-
+            return {"ok": True, **self.list_day(datetime.now())}
         if fn == "day":
-            # expects a 'date' field
-            when: Optional[datetime] = payload.get("date")
+            when = payload.get("date")
             if not when:
                 return {"ok": False, "error": "Missing date for 'day' query"}
-            return {"ok": True, **self.list_day(when, payload.get("calendar", "Home"))}
+            return {"ok": True, **self.list_day(when)}
+        if fn == "upcoming":
+            return {"ok": True, **self.list_upcoming(int(payload.get("days", 7)))}
 
         return {"ok": False, "error": f"Unknown fn: {fn}"}
