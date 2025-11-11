@@ -86,138 +86,7 @@ def _llm_generate_subject(prompt: str) -> str:
     except Exception as e:
         logger.log_error(e, context="LLMSubject")
         return "(no subject)"
-    
-# ---- helpers (leave behavior intact) --------------------------------
-def _llm_speakable_from_results(query: str, results: list[dict], extracted: str | None = None) -> str:
-    if not results and not extracted:
-        return ""
 
-    def _clean_snippet(text: str) -> str:
-        text = re.sub(r"[*•\-\n]+", " ", text)
-        return re.sub(r"\s+", " ", text).strip()
-
-    # Top results (for context only)
-    lines = [f"{_clean_snippet(r['snippet'])} ({host(r['url'])})" for r in results[:3]]
-    content = "\n".join(lines)
-
-    # If we already pulled out a fact, force it
-    fact_hint = f"\nExtracted fact (use exactly, do not paraphrase): {extracted}" if extracted else ""
-
-    msgs = [
-        SystemMessage(content=(
-            "You are Mira, a warm and reliable companion AI.\n"
-            "Rules:\n"
-            "- If an extracted fact is provided, you MUST repeat it exactly, no guessing.\n"
-            "- Otherwise, summarize briefly from the snippets.\n"
-            "- Speak in one or two natural sentences, no bullets, no markdown.\n"
-            "- If a source matters, drop the site name casually (e.g. 'Reuters says...')."
-        )),
-        HumanMessage(content=(
-            f"User asked: {query}\n"
-            f"Top findings:\n{content}{fact_hint}\n"
-            "Now answer conversationally."
-        ))
-    ]
-
-    try:
-        # 🔑 use fact-LLM (temperature 0.0)
-        resp = llm_facts.invoke(msgs)
-        txt = (resp.content or "").strip()
-        if not txt and extracted:
-            return extracted  # last resort, just return the raw fact
-        return re.sub(r"[*•\-]+", "", txt)[:400] if txt else ""
-    except Exception:
-        return extracted or ""
-    
-def _llm_price_comparison(query: str, items: list[dict]) -> str:
-    """
-    Compare prices across multiple sites/sources.
-    Supports both product dicts (title/price/url) and stock dicts (symbol/price/source).
-    """
-    if not items:
-        return "I couldn’t find any prices for that."
-
-    lines = []
-    for p in items:
-        price = p.get("price", "N/A")
-
-        # Handle products (url/title) vs stock prices (symbol/source)
-        if "symbol" in p:  # stock price case
-            site = domain_trust.host(p.get("source", "")) if p.get("source") else "unknown source"
-            label = p.get("symbol", "Unknown symbol").upper()
-            lines.append(f"{label}: {price} on {site}")
-        else:  # product case
-            site = domain_trust.host(p.get("url", "")) if p.get("url") else "unknown site"
-            label = p.get("title", "Unknown product")
-            lines.append(f"{label}: {price} on {site}")
-
-    content = "\n".join(lines)
-
-    msgs = [
-        SystemMessage(content=(
-            "You are Mira, a helpful shopping companion.\n"
-            "Rules:\n"
-            "- Compare prices across sites clearly.\n"
-            "- Mention the site/source and the price.\n"
-            "- If there are multiple results, highlight the cheapest.\n"
-            "- Speak naturally in one or two sentences, no markdown."
-        )),
-        HumanMessage(content=(
-            f"User asked about: {query}\n"
-            f"Here are the prices found:\n{content}\n"
-            "Now answer conversationally with a comparison."
-        ))
-    ]
-
-    try:
-        resp = llm_facts.invoke(msgs)
-        return (resp.content or "").strip()
-    except Exception:
-        # fallback: structured fallback
-        return " ; ".join(lines)
-
-def _llm_speakable_planner_results(city: str, results: List[Dict[str, str]], extracted: Optional[str] = None) -> str:
-    """
-    Turn scraped planner results into a natural, upbeat response for Mira.
-    """
-    if not results and not extracted:
-        return ""
-
-    def _clean_snippet(text: str) -> str:
-        text = re.sub(r"[*•\-\n]+", " ", text)
-        return re.sub(r"\s+", " ", text).strip()
-
-    # Format top results for LLM context
-    lines = []
-    for r in results[:5]:
-        snippet = r.get("summary") or r.get("snippet") or ""
-        if snippet:
-            lines.append(f"{_clean_snippet(snippet)} ({r.get('url', '')})")
-    content = "\n".join(lines)
-
-    fact_hint = f"\nExtracted highlight (include naturally): {extracted}" if extracted else ""
-
-    msgs = [
-        SystemMessage(content=(
-            "You are Mira, a warm and reliable companion AI helping plan weekends.\n"
-            "Rules:\n"
-            "- Give 2–3 engaging suggestions, not a list dump.\n"
-            "- Keep it short and upbeat, like you're chatting with a friend.\n"
-            "- Use the city name casually.\n"
-            "- If a source is notable (Timeout, Eventbrite, Yelp), mention it naturally.\n"
-            "- Do NOT use markdown, bullet points, or URLs in your response.\n"
-            "- Always sound excited and helpful, not robotic."
-        )),
-        HumanMessage(content=(
-            f"I'm looking for things to do this weekend in {city}.\n"
-            f"Here are some snippets:\n{content}{fact_hint}\n"
-            "Now suggest a fun plan conversationally."
-        ))
-    ]
-
-    # ⚡️ Call your LLM client here (replace with your wrapper)
-    resp = llm_facts.invoke(msgs)
-    return (resp.content or "").strip()
 
 NUM_WORDS = {
     "one": 1,
@@ -233,14 +102,28 @@ NUM_WORDS = {
 }
 
 def _clean_body_text(prompt: str, recipient: str) -> str:
-    """Strip voice command phrases like 'email Saad' from body."""
+    """Strip voice command phrases like 'email Saad.' or 'email to Nikki,' from body."""
     body = re.sub(
-        rf"(email|e-mail|mail)\s+(to\s+)?{recipient}\b[:,]?\s*", "", prompt, flags=re.IGNORECASE
+        rf"(email|e-mail|mail)\s+(to\s+)?{recipient}\b[\s:,.!?-]*",
+        "",
+        prompt,
+        flags=re.IGNORECASE,
     )
-    body = re.sub(r"^(send|write)\s+(an\s+)?(email|mail)\s+(to\s+)?", "", body, flags=re.IGNORECASE)
-    body = re.sub(r"^(message|text)\s+(to\s+)?", "", body, flags=re.IGNORECASE)
+    body = re.sub(
+        r"^(send|write)\s+(an\s+)?(email|mail)\s+(to\s+)?",
+        "",
+        body,
+        flags=re.IGNORECASE,
+    )
+    body = re.sub(
+        r"^(message|text)\s+(to\s+)?",
+        "",
+        body,
+        flags=re.IGNORECASE,
+    )
     body = body.strip()
     return body[0].upper() + body[1:] if body else prompt
+
 
 def _clean_subject(subject: str) -> str:
     """
@@ -428,20 +311,47 @@ def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
         elif "email" in prompt or "mail" in prompt:
             intent = "email"
 
-        # 📅 Calendar
-        elif any(w in prompt for w in ["calendar", "schedule", "event", "meeting"]):
+        # 📅 Calendar & Scheduling (broadened)
+        elif any(
+            phrase in prompt
+            for phrase in [
+                "calendar", "schedule", "meeting",
+                "appointment", "reminder",
+                "what do i have", "what do we have",
+                "anything planned", "anything scheduled",
+                "do i have", "do we have",
+                "have scheduled", "have planned",
+                "show my schedule", "show our schedule"
+            ]
+        ):
             intent = "calendar"
 
         # 🆕 Booking
         elif any(w in prompt for w in ["book flight", "flight to", "movie tickets", "reserve", "reservation", "booking"]):
             intent = "booking"
 
-        # 🆕 Buying
-        elif any(w in prompt for w in ["buy", "order", "price of", "deal", "cheapest", "compare", "under $", "under ₹"]):
+        # 🆕 Buying (E-commerce / retail products)
+        elif any(
+            w in prompt
+            for w in [
+                "buy", "order", "price of", "deal", "cheapest", "compare",
+                "under $", "under ₹", "discount", "shopping", "amazon",
+                "flipkart", "walmart", "costco", "target", "sale"
+            ]
+        ):
             intent = "buying"
 
-        # 🆕 Planner
-        elif any(w in prompt for w in ["plan weekend", "weekend plan", "itinerary", "meetup", "eventbrite", "instagram trends", "yelp"]):
+        # 🌆 Smart Planner (broadened for “near me”, “explore”, “trails”, “restaurants”, etc.)
+        elif (
+            re.search(r"\b(plan|suggest|find|explore|discover|what to do|where to go|things to do|near me)\b", prompt)
+            and re.search(r"\b(weekend|today|tonight|tomorrow|trip|outing|vacation|holiday|saturday|sunday|event|concert|restaurant|place|bar|cafe|club|trail|park|museum|activity|walk|hike|itinerary)\b", prompt)
+        ) or any(
+            w in prompt
+            for w in [
+                "itinerary", "meetup", "eventbrite", "ticketmaster", "tripadvisor",
+                "yelp", "opentable", "thrillist", "timeout", "instagram trends", "walking trail", "hiking spot"
+            ]
+        ):
             intent = "planner"
 
     # --- If still undecided, fall back to LLM classification ---
@@ -460,7 +370,7 @@ def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     "- 'calendar/schedule/meeting/event' → 'calendar'.\n"
                     "- Booking keywords (flight/movie/reserve) → 'booking'.\n"
                     "- Buying/comparison/deal/price → 'buying'.\n"
-                    "- Planner/itinerary/meetup/eventbrite/instagram/yelp → 'planner'."
+                    "- 'explore/discover/near me/itinerary/weekend/eventbrite/yelp/tripadvisor/trail/restaurant/activity' → 'planner'"
                 )
             ),
             *state.get("meta", {}).get("context", []),
@@ -481,7 +391,6 @@ def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # Calendar
             "meeting": "calendar",
             "schedule": "calendar",
-            "event": "calendar",
 
             # Search
             "headline": "search",
@@ -537,8 +446,6 @@ def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     state["intent"] = intent
     return state
-
-
 
 
 FILLERS = [
@@ -603,96 +510,90 @@ def music_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     return state
 
-
-
-def search_node(state: Dict[str, Any]) -> Dict[str, Any]:
+def search_node(state: dict[str, any]) -> dict[str, any]:
     query = state["prompt"]
 
     # ---- intent + date resolution ----
     intent = intent_from_query(query)
     target_date = resolve_target_date(query)
-
-    bw = get_browser()
+    bw = BrowserWorker(headless=True)
 
     # ---- prime query for freshness ----
     primed_q = query
     if target_date and intent in ("sports", "finance", "news"):
         primed_q = f"{query} {target_date.strftime('%b %d, %Y')}"
-    elif intent in ("sports", "news", "finance"):
+    elif intent in ("sports", "finance", "news"):
         primed_q = f"{query} today"
 
-    def _do_search(q: str):
-        ans = bw.search_sync(q, max_sites=8) or {}
-        return ans, (ans.get("links", []) or [])
-
-    # ---- run search (primed → fallback) ----
-    ans, links = _do_search(primed_q)
-    if not links:
-        ans, links = _do_search(query)
+    # ---- run search ----
+    try:
+        ans = bw.search_sync(primed_q, max_sites=8)
+        links = ans.get("links", [])
+        if not links:
+            ans = bw.search_sync(query, max_sites=8)
+            links = ans.get("links", [])
+    except Exception as e:
+        logger.log_error(e, context="search_node.search")
+        links = []
 
     if not links:
         state["result"] = f"Sorry {cfg.USER_NAME}, I couldn’t find results for “{query}.”"
         return state
-    
-    # ---- rank with trust-aware scoring ----
+
+    # ---- rank and trust weighting ----
     ranked = sorted(
         links,
-        key=lambda l: score_link(
-            l.get("title", ""), 
-            l.get("url", ""), 
+        key=lambda l: domain_trust.score_link(
+            l.get("title", ""),
+            l.get("url", ""),
             target_date,
-            intent
+            intent,
         ),
         reverse=True,
     )
 
-    # ---- trusted-first filtering (using intent_trust_weight) ----
     trusted = [
         l for l in ranked
-        if domain_trust.intent_trust_weight(domain_trust.host(l.get("url", "")), intent, query) > 0
+        if domain_trust.intent_trust_weight(
+            domain_trust.host(l.get("url", "")), intent, query
+        ) > 0
     ]
     if trusted:
-        # put trusted first, then the rest
         ranked = trusted + [l for l in ranked if l not in trusted]
 
-    # ---- extract snippets ----
-    results: list[dict] = []
-    for link in ranked[:5]:
-        url = link.get("url", "")
-        title = (link.get("title") or "").strip()
-        snippet = ""
+    urls = [l["url"] for l in ranked[:5] if "url" in l]
 
-        try:
-            snippet = bw.smart_extract_sync(
-                query,
-                url,
-                stateful=(intent in ("news", "finance", "sports"))
-            ) or ""
-        except Exception as e:
-            logger.log_error(e, context=f"search_node.smart_extract {url}")
-
-        if not snippet:
-            snippet = title
-        if snippet:
-            results.append({"url": url, "snippet": snippet})
-
-        if len(results) >= 3:
-            break
-
-    # ---- synthesis for user-friendly reply ----
-    speakable = _llm_speakable_from_results(query, results)
-    if not speakable:
-        if results:
-            speakable = "Here’s what I found: " + results[0]["snippet"]
+    # ---- summarization ----
+    summary = ""
+    try:
+        if intent in ("sports", "finance", "news"):
+            # multimodal vision summary via GPT-4o
+            summary = bw.multi_site_answer_sync(query, urls)
         else:
-            speakable = f"Sorry {cfg.USER_NAME}, no details extracted."
+            # lightweight text-only extraction
+            snippets = []
+            for url in urls[:3]:
+                try:
+                    snippet = bw.smart_extract_sync(
+                        query, url, stateful=(intent in ("tech", "science"))
+                    ) or ""
+                    if snippet:
+                        snippets.append(snippet)
+                except Exception as e:
+                    logger.log_error(e, context=f"search_node.smart_extract {url}")
+            summary = " ".join(snippets[:2]) or "Here’s what I found."
+    except Exception as e:
+        logger.log_error(e, context="search_node.summary_phase")
 
-    # add explicit date context for sports stats queries
+    if not summary:
+        summary = "Here’s what I found: " + "; ".join(urls[:3])
+
     if target_date and intent == "sports":
-        speakable = f"{speakable} on {target_date.strftime('%b %d, %Y')}."
+        summary = f"{summary} on {target_date.strftime('%b %d, %Y')}."
 
-    state["result"] = speakable
+    state["result"] = summary
     return state
+
 
 
 def email_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -794,47 +695,69 @@ def email_node(state: Dict[str, Any]) -> Dict[str, Any]:
     return state
 
 
-
 def calendar_node(state: Dict[str, Any]) -> Dict[str, Any]:
     prompt = state.get("prompt")
 
+    # Build payload
     if isinstance(prompt, str):
         if "add" in prompt.lower() or "schedule" in prompt.lower():
             payload = {"fn": "add", "title": prompt}
         else:
-            payload = {"fn": "today"}
+            payload = {"title": prompt}  # Let agent auto-detect (today, tomorrow, upcoming)
     elif isinstance(prompt, dict):
         payload = prompt
     else:
         payload = {"fn": "unknown", "data": str(prompt)}
 
+    # Call Calendar agent
     res = _calendar.handle(payload)
 
     if not isinstance(res, dict):
         state["result"] = str(res)
         return state
 
-    if payload.get("fn") == "add" and res.get("status") == "added":
+    fn = payload.get("fn", "").lower()
+
+
+    if fn == "add" and res.get("status") == "added":
         state["result"] = f"Okay, I added '{res.get('event')}' to your {res.get('calendar')} calendar."
-    elif payload.get("fn") == "today" and res.get("status") == "ok":
+
+
+    elif fn == "today" and res.get("status") == "ok":
         events = res.get("events", [])
-        if not events:
-            state["result"] = "You don’t have anything scheduled today."
-        else:
-            joined = "; ".join(events[:3])
-            more = "…" if len(events) > 3 else ""
-            state["result"] = f"Here are your events today: {joined}{more}"
+        state["result"] = (
+            "You don’t have anything scheduled today."
+            if not events else
+            f"Here are your events today: {'; '.join(events[:3])}{'…' if len(events) > 3 else ''}"
+        )
+
+    elif fn == "day" and res.get("status") == "ok":
+        events = res.get("events", [])
+        state["result"] = (
+            "You don’t have anything scheduled tomorrow."
+            if not events else
+            f"Here’s what’s planned for tomorrow: {'; '.join(events[:3])}{'…' if len(events) > 3 else ''}"
+        )
+
+    elif fn == "upcoming" and res.get("status") == "ok":
+        events = res.get("events", [])
+        state["result"] = (
+            "No upcoming events — you’re clear!"
+            if not events else
+            f"Here’s what’s coming up: {'; '.join(events[:3])}{'…' if len(events) > 3 else ''}"
+        )
+
     else:
-        state["result"] = res.get("error", "Sorry, I couldn’t update your calendar.")
+        state["result"] = res.get("error", "Sorry, I couldn’t retrieve your calendar.")
 
     return state
 
-
 def buying_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Node for commerce, product, and finance lookups via BuyingAgent."""
     prompt = state.get("prompt")
 
-    # Default: treat string as a crawl query
-    payload = {"fn": "crawl", "query": prompt} if isinstance(prompt, str) else prompt
+    # Default payload: all queries go through the new discover flow
+    payload = {"fn": "discover", "query": prompt} if isinstance(prompt, str) else prompt
 
     try:
         loop = asyncio.get_event_loop()
@@ -845,55 +768,32 @@ def buying_node(state: Dict[str, Any]) -> Dict[str, Any]:
             res = asyncio.run(_buying.handle(payload))
     except Exception as e:
         logger.log_error(e, context="buying_node.handle")
-        res = {"ok": False, "error": str(e)}
+        state["result"] = f"BuyingAgent internal error: {e}"
+        return state
 
     # ----------------- Format Result -----------------
-    if res.get("ok"):
-        # ✅ Product case
-        if "products" in res:
-            products = res["products"]
+    if not res.get("ok"):
+        state["result"] = res.get("error", "Sorry, I couldn’t fetch any buying results.")
+        return state
 
-            # Normalize all products to guarantee keys
-            normalized = []
-            for p in products[:5]:
-                if isinstance(p, dict):
-                    normalized.append({
-                        "title": p.get("title", "Unknown title"),
-                        "price": p.get("price", "N/A"),
-                        "url": p.get("url", "")
-                    })
-                else:
-                    logger.log_error(f"Unexpected product format: {p}")
+    result = res.get("result", {})
+    summary = result.get("summary", "")
+    sources = result.get("sources", [])
+    intent = result.get("intent", "")
 
-            speakable = _llm_price_comparison(prompt, normalized)
-
-            if not speakable:
-                # Fallback: structured list
-                lines = [f"{p['title']} — {p['price']}" for p in normalized]
-                speakable = "Here are some product results:\n" + "\n".join(lines)
-
-            state["result"] = speakable
-
-        # ✅ Stock price case
-        elif "prices" in res:
-            prices = res["prices"]
-            lines = [
-                f"{p['symbol'].upper()} is {p['price']} (from {domain_trust.host(p['source'])})"
-                for p in prices
-            ]
-            state["result"] = " ; ".join(lines)
-
-        # ✅ General query case
-        elif "results" in res:
-            results = res["results"]
-            lines = [f"{r['url']} — {r['content'][:150]}..." for r in results[:3]]
-            state["result"] = "Here are some sources I found:\n" + "\n".join(lines)
-
-        else:
-            state["result"] = "Got a response, but couldn’t parse it."
-
+    # ✅ GPT-4o summarized commerce / finance insight
+    if summary:
+        state["result"] = summary
+    elif sources:
+        # fallback if LLM summary failed
+        links = [f"- {domain_trust.host(u)}: {u}" for u in sources[:5]]
+        state["result"] = "Here are a few relevant sources I found:\n" + "\n".join(links)
     else:
-        state["result"] = res.get("error", "Sorry, I couldn’t fetch results.")
+        state["result"] = "I couldn’t find any useful sources for that query."
+
+    # Optional structured metadata
+    state["intent"] = intent
+    state["sources"] = sources
 
     return state
 
@@ -925,18 +825,19 @@ def booking_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def planner_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Node for discovering city plans using PlannerAgent (auto-detects intent)."""
     prompt = state.get("prompt", "").strip()
-    city = None
 
-    # crude city detection → could hook up to NER later
-    for word in prompt.split():
-        if word[0].isupper() and len(word) > 2:  # e.g. "Boston", "Chicago"
-            city = word
-            break
-    if not city:
-        city = "New York"
+    # 🧭 Auto-select fn based on natural language
+    text_lower = prompt.lower()
+    if any(k in text_lower for k in ("weekend", "this weekend", "saturday", "sunday")):
+        fn = "weekend"
+    elif any(k in text_lower for k in ("explore", "discover", "find", "things to do", "activities")):
+        fn = "discover"
+    else:
+        fn = "explore"
 
-    payload = {"fn": "weekend", "city": city}
+    payload = {"fn": fn, "text": prompt}
 
     try:
         loop = asyncio.get_event_loop()
@@ -950,19 +851,18 @@ def planner_node(state: Dict[str, Any]) -> Dict[str, Any]:
         res = {"ok": False, "error": str(e)}
 
     # ----------------- Format Result -----------------
-    if res.get("ok") and "activities" in res:
-        activities = res["activities"]
+    if res.get("ok"):
+        summary = res.get("summary", "")
+        city = res.get("city", "")
+        intent = res.get("intent", fn)
 
-        # pass into LLM for a chatty summary
-        speakable = _llm_speakable_planner_results(city, activities)
-        if not speakable:
-            # fallback: structured dump
-            lines = [f"{a['title']} — {a['summary']}" for a in activities[:3]]
-            speakable = f"Here are some ideas for {city} this weekend:\n" + "\n".join(lines)
-
-        state["result"] = speakable
+        if summary:
+            prefix = f"Here’s what’s happening in {city} ({intent} mode):" if city else "Here’s what I found:"
+            state["result"] = f"{prefix} {summary}"
+        else:
+            state["result"] = f"Sorry, I couldn’t find much happening in {city or 'your area'} right now."
     else:
-        state["result"] = res.get("error", f"Sorry, I couldn’t find activities for {city}.")
+        state["result"] = res.get("error", "Sorry, I couldn’t process your planner request.")
 
     return state
 
