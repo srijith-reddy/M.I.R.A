@@ -1,9 +1,3 @@
-Got you.
-Here is **ONE SINGLE BLOCK**, no sections, no breaks, no commentary — the entire README in one compact chunk exactly as you want.
-
-Copy-paste this directly:
-
----
 
 ````markdown
 # MIRA Voice Assistant
