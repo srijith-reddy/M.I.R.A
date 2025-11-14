@@ -37,32 +37,8 @@ BLOCK_SIZE=320
 VAD_AGGRESSIVENESS=2
 STOP_MS=2000
 TAIL_MS=100
-DEVICE="MacBook Pro Microphone"
-USER_NAME=Shrey
-```
-
-## Features
-
-Wake-word (“Hey MIRA”), Whisper STT, Cartesia TTS, Playwright BrowserAgent (vision + scrolling), VAD-based silence trimming, LangGraph reasoning/memory.
-
-## Tests
-
-```bash
-python tools/test_wakeword.py
-python tools/test_browser.py
-```
-
-## Structure
-
-```
-main.py
-environment.yml
-mira/
-  audio/
-  browser/
-  agents/
-  llm/
-  core/
+DEVICE="MacBook Pro Microphone" # Change depending on hardware
+USER_NAME=Name
 ```
 
 ## Notes
