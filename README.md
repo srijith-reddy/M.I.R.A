@@ -6,6 +6,7 @@
 ```bash
 # Install micromamba (if not installed)
 brew install micromamba
+
 git clone https://github.com/srijith-reddy/M.I.R.A.git mira-voice-assistant
 cd mira-voice-assistant
 micromamba create -f environment.yml -n mira-voice-assistant
