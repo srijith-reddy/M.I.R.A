@@ -2,8 +2,6 @@
 
 # MIRA Voice Assistant
 
-Multimodal, voice-activated assistant with wake-word detection, Whisper STT, Cartesia TTS, Playwright browser automation, and LangGraph reasoning. Repo: https://github.com/srijith-reddy/M.I.R.A — Entry point: `main.py`.
-
 ````markdown
 ## Quick Start
 ```bash
