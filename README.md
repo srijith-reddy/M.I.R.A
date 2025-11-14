@@ -39,8 +39,3 @@ USER_NAME=Name
 .env is ignored, keep screenshots/audio out of git, deps pinned in environment.yml.
 
 ```
-
----
-
-If you want this **even smaller**, **even more compressed**, or in **one literal paragraph**, I can do that too.
-```
