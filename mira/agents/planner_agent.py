@@ -17,7 +17,8 @@ from mira.core import domain_trust
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 import shutil
-
+from PIL import Image, ImageEnhance
+import os
 _engine = inflect.engine()
 
 
@@ -193,30 +194,80 @@ class PlannerAgent:
             logger.log_error(e, context="BrowserAgent._scrape_with_scrapy")
             return ""
 
+   
     # ======================================================
-    # 🔹 Scroll + full-page capture
+    # 🌆 Contextual Screenshot Capture for PlannerAgent
     # ======================================================
+    from PIL import Image, ImageEnhance
+    import os
+
     async def _scroll_and_capture_full_page(self, page, base_path: str) -> str:
+        """
+        Captures high-resolution screenshots optimized for GPT-4o Vision.
+        Focuses on contextual and location-rich sections — maps, venues, events.
+        """
         stitched_path = f"{base_path}_stitched.png"
         try:
+            domain = page.url.split("/")[2] if "://" in page.url else page.url
+
+            # 🖱️ Smooth scroll to load dynamic content
             await page.evaluate("""
                 (async () => {
                     let lastHeight = 0;
                     while (true) {
                         window.scrollBy(0, window.innerHeight);
                         await new Promise(r => setTimeout(r, 500));
-                        let newHeight = document.body.scrollHeight;
+                        const newHeight = document.body.scrollHeight;
                         if (newHeight === lastHeight) break;
                         lastHeight = newHeight;
                     }
+                    window.scrollTo(0, 0);
                 })();
             """)
-            await page.screenshot(path=stitched_path, full_page=True)
-            print(f"✅ [DEBUG] Full-page screenshot saved: {stitched_path}")
+            await page.wait_for_timeout(1000)
+            await page.emulate_media(media="screen")
+            await page.set_viewport_size({"width": 1400, "height": 2400})
+
+            # 🧭 Focused region capture for maps, venues, events
+            selectors = [
+                "section:has-text('map')", "div:has-text('Map')",
+                "section:has-text('nearby')", "section:has-text('restaurants')",
+                "section:has-text('things to do')", "div:has-text('event')",
+                "section:has-text('places')", "div[class*='venue']",
+                "div[class*='event']", "div[class*='activity']",
+                "section[class*='listing']", "div[class*='explore']",
+            ]
+            for sel in selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        await el.screenshot(path=stitched_path, type="png")
+                        print(f"✅ [DEBUG] Focused region captured ({sel}): {stitched_path}")
+                        break
+                except Exception as e:
+                    print(f"⚠️ [DEBUG] Selector {sel} failed: {e}")
+
+            # Fallback to full-page
+            if not os.path.exists(stitched_path):
+                await page.screenshot(path=stitched_path, full_page=True, type="png")
+                print(f"✅ [DEBUG] Full-page screenshot saved: {stitched_path}")
+
+            # ✨ Enhance clarity
+            try:
+                img = Image.open(stitched_path)
+                img = ImageEnhance.Contrast(img).enhance(1.25)
+                img = ImageEnhance.Sharpness(img).enhance(1.8)
+                img.save(stitched_path)
+                print("🎨 [DEBUG] Enhanced screenshot for readability.")
+            except Exception as e:
+                print(f"⚠️ [DEBUG] Pillow enhancement failed: {e}")
+
             return stitched_path
+
         except Exception as e:
-            logger.log_error(e, context="_scroll_and_capture_full_page")
+            print(f"⚠️ [WARN] Screenshot failed for {page.url}: {e}")
             return ""
+
 
     # ======================================================
     # 🔹 Playwright scraper (safe shared profile)
@@ -386,40 +437,51 @@ class PlannerAgent:
 
         # --- Persona & summarization intent ---
         system_prompt = (
-            "You are Mira, a warm but precise city-guide assistant.\n"
-            "- Combine facts from all extracts naturally.\n"
-            "- Focus on the most interesting, trending, or local-relevant activities.\n"
-            "- Highlight outdoor trails, food spots, art shows, or unique events when detected.\n"
-            "- Speak conversationally (like recommending to a friend), no markdown.\n"
-            "- Avoid repetition, filler text, and links.\n"
-            "- Mention the source name casually if clear (e.g., 'Timeout suggests...', 'Yelp highlights...').\n"
-            "- Output should be 3-6 sentences max, compact, friendly, and insightful."
-        )
+        "You are Mira, a warm but precise city-guide assistant.\n"
+        "- Use only the information visible in the provided extracts and screenshots — do not rely on prior or external knowledge.\n"
+        "- Combine facts from all extracts naturally to describe what’s happening or trending in the area.\n"
+        "- Highlight specific experiences mentioned — such as restaurants, events, outdoor spots, exhibits, or activities — but don’t invent new ones.\n"
+        "- If something isn’t shown or stated, do not speculate or add assumptions.\n"
+        "- Speak conversationally, as if recommending to a friend — friendly but factual, no markdown or links.\n"
+        "- Mention source names casually if they’re clear (e.g., 'Timeout suggests...', 'Yelp highlights...').\n"
+        "- Keep it concise — 3–6 sentences max, grounded, vivid, and human."
+    )
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"User asked: {query}\nNow review all extracts and screenshots for key experiences.")
+
+        messages = [SystemMessage(content=system_prompt)]
+
+        # --- Consolidate all text + screenshots into one unified HumanMessage ---
+        consolidated_content = [
+            {"type": "text", "text": f"User asked: {query}\nHere are extracts and screenshots from multiple city sources:"}
         ]
 
-        # --- Attach textual + visual evidence per site ---
         for s in site_results:
             try:
                 clean_text = _clean_snippet(s.get("text", "")) or "(no readable text)"
+                url = s.get("url", "")
+                domain = url.split("/")[2] if "://" in url else url
+
                 # handle screenshot path normalization
                 ss_path = s.get("screenshot") or s.get("screenshot_path")
                 if ss_path and os.path.exists(ss_path):
-                    with open(ss_path, "rb") as f:
-                        img_b64 = base64.b64encode(f.read()).decode("utf-8")
-                    messages.append(
-                        HumanMessage(content=[
-                            {"type": "text", "text": f"Screenshot from {s['url']} — analyze visible text for relevant locations or activities."},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
-                        ])
-                    )
-                domain = s["url"].split("/")[2] if "://" in s["url"] else s["url"]
-                messages.append(HumanMessage(content=f"Extracted content from {domain}:\n{clean_text}"))
+                    try:
+                        with open(ss_path, "rb") as f:
+                            img_b64 = base64.b64encode(f.read()).decode("utf-8")
+                        consolidated_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{img_b64}"}
+                        })
+                    except Exception as e:
+                        logger.log_error(e, context=f"PlannerAgent._multi_vision_summarize.imgload {domain}")
+
+                consolidated_content.append({
+                    "type": "text",
+                    "text": f"Extracted content from {domain}:\n{clean_text}\n"
+                })
             except Exception as e:
                 logger.log_error(e, context=f"PlannerAgent._multi_vision_summarize.cleanloop {s.get('url')}")
+
+        messages.append(HumanMessage(content=consolidated_content))
 
         # --- Invoke LLM and post-clean output ---
         try:
@@ -439,6 +501,7 @@ class PlannerAgent:
         except Exception as e:
             logger.log_error(e, context="PlannerAgent._multi_vision_summarize.invoke_fail")
             return "I couldn’t process the city insights right now."
+
 
     # ======================================================
     # 🔹 City / Intent-aware Discoverer (uses smart_extract)

@@ -17,7 +17,9 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from mira.utils import logger
 from mira.core import domain_trust
 from mira.core.config import cfg
-
+import os
+from PIL import Image, ImageEnhance
+from mira.core.domain_trust import TRUSTED_SHOPS, TRUSTED_TECH_NEWS
 # ======================================================
 # 🔹 GLOBALS
 # ======================================================
@@ -171,30 +173,150 @@ class BuyingAgent:
             logger.log_error(e, context="BuyingAgent._scrape_with_scrapy")
             return ""
 
+
     # ======================================================
-    # 🔹 Scroll + capture
+    # 🔹 Improved Screenshot Capture (GPT-4o + Domain Trust)
     # ======================================================
     async def _scroll_and_capture_full_page(self, page, base_path: str) -> str:
+        """
+        Captures a high-resolution, contrast-enhanced screenshot optimized for GPT-4o Vision.
+        • Uses TRUSTED_SHOPS / TRUSTED_TECH from domain_trust instead of hard-coded domains.
+        • Handles reload-heavy or ad-injected e-commerce pages gracefully.
+        • Scrolls through lazy-loaded sections and enhances readability for OCR.
+        """
         stitched_path = f"{base_path}_stitched.png"
         try:
+            domain = page.url.split("/")[2] if "://" in page.url else page.url
+
+            # ======================================================
+            # ⚙️ 1️⃣ Stabilize reload-heavy / commerce-heavy domains
+            # ======================================================
+            reload_heavy = set(TRUSTED_SHOPS.keys()) | set(TRUSTED_TECH_NEWS.keys())
+
+            if any(d.split(".")[0] in domain for d in reload_heavy):
+                print(f"⚙️ [DEBUG] Stabilizing reload-prone / e-commerce page: {domain}")
+                try:
+                    await page.wait_for_timeout(3000)
+                    await page.evaluate("window.stop();")
+                    await page.wait_for_timeout(700)
+                except Exception:
+                    pass
+
+            # ======================================================
+            # 🖱️ 2️⃣ Smooth scroll to trigger lazy loads
+            # ======================================================
             await page.evaluate("""
                 (async () => {
                     let lastHeight = 0;
                     while (true) {
                         window.scrollBy(0, window.innerHeight);
                         await new Promise(r => setTimeout(r, 500));
-                        let newHeight = document.body.scrollHeight;
+                        const newHeight = document.body.scrollHeight;
                         if (newHeight === lastHeight) break;
                         lastHeight = newHeight;
                     }
+                    window.scrollTo(0, 0);
                 })();
             """)
-            await page.screenshot(path=stitched_path, full_page=True)
-            print(f"✅ [DEBUG] Full-page screenshot saved: {stitched_path}")
+            await page.wait_for_timeout(1000)
+            await page.emulate_media(media="screen")
+            await page.set_viewport_size({"width": 1400, "height": 2400})
+
+            # ======================================================
+            # 🔍 3️⃣ Adaptive Zoom (domain trust–based)
+            # ======================================================
+            trust_score = max(
+                TRUSTED_SHOPS.get(domain, 0),
+                TRUSTED_TECH_NEWS.get(domain, 0)
+            )
+            zoom_factor = 1.25 if trust_score >= 5 else 1.15
+            try:
+                await page.evaluate(f"""
+                    (function() {{
+                        const z = {zoom_factor};
+                        document.body.style.zoom = z;
+                        document.body.style.transform = `scale(${zoom_factor})`;
+                        document.body.style.transformOrigin = '0 0';
+                        document.documentElement.style.scrollBehavior = 'auto';
+                        window.scrollTo(0, 0);
+                    }})();
+                """)
+                await page.wait_for_timeout(500)
+                print(f"🔍 [DEBUG] Applied zoom factor {zoom_factor}")
+            except Exception as e:
+                print(f"⚠️ [DEBUG] Zoom adjustment failed: {e}")
+
+            # ======================================================
+            # 🧩 4️⃣ Focused capture (deal / price / review sections)
+            # ======================================================
+            print(f"🔍 [DEBUG] Attempting focused capture for {domain}")
+            
+            focus_selectors = [
+            # --- Deal / Price keywords ---
+            "section:has-text('deal')", "section:has-text('deals')",
+            "section:has-text('price')", "section:has-text('discount')",
+            "section:has-text('offer')", "section:has-text('save')",
+            "div:has-text('Deal')", "div:has-text('Deals')",
+            "div:has-text('Price')", "div:has-text('Discount')",
+            "div:has-text('Offer')", "div:has-text('Savings')",
+            "div[class*='deal']", "div[class*='deals']",
+            "div[class*='discount']", "div[class*='offer']",
+            "div[class*='price']", "div[id*='price']",
+
+            # --- E-commerce product / listing containers ---
+            "div#centerCol", "div#ppd", "div[data-component-type='s-search-result']",
+            "div[class*='product']", "div[class*='grid']", "div[class*='tile']",
+            "div[class*='sku']", "div[class*='item']", "div[class*='listing']",
+            "div[class*='buybox']", "div[class*='card']", "li[class*='result']",
+
+            # --- Editorial / Recommendations ---
+            "section:has-text('Recommended')", "section:has-text('Top Picks')",
+            "section:has-text('Best')", "section:has-text('Editor')",
+            "section:has-text('Staff Pick')", "section:has-text('Our Choice')",
+            "section[class*='list']", "article[class*='recommendation']",
+
+            # --- Specs / Comparison tables ---
+            "table[class*='spec']", "table[class*='comparison']",
+            "div[class*='spec']", "section[class*='spec']",
+        ]
+
+            for sel in focus_selectors:
+                try:
+                    element = await page.query_selector(sel)
+                    if element:
+                        await element.screenshot(path=stitched_path, type="png")
+                        print(f"✅ [DEBUG] Focused region captured ({sel}): {stitched_path}")
+                        break
+                except Exception as e:
+                    print(f"⚠️ [DEBUG] Selector {sel} failed: {e}")
+
+            # ======================================================
+            # 🖼️ 5️⃣ Fallback full-page capture
+            # ======================================================
+            if not os.path.exists(stitched_path):
+                await page.screenshot(path=stitched_path, full_page=True, type="png")
+                print(f"✅ [DEBUG] Full-page screenshot saved: {stitched_path}")
+
+            # ======================================================
+            # ✨ 6️⃣ Enhance sharpness + contrast for OCR clarity
+            # ======================================================
+            try:
+                img = Image.open(stitched_path)
+                img = ImageEnhance.Contrast(img).enhance(1.25)
+                img = ImageEnhance.Sharpness(img).enhance(1.8)
+                img.save(stitched_path)
+                print("🎨 [DEBUG] Enhanced screenshot for OCR clarity.")
+            except Exception as e:
+                print(f"⚠️ [DEBUG] Pillow enhancement failed: {e}")
+
             return stitched_path
+
         except Exception as e:
+            print(f"⚠️ [WARN] Screenshot failed for {page.url}: {e}")
             logger.log_error(e, context="_scroll_and_capture_full_page")
             return ""
+
+
 
     # ======================================================
     # 🔹 Playwright scraper (safe shared profile)
@@ -203,28 +325,41 @@ class BuyingAgent:
         await self._ensure_playwright()
         screenshot_path = None
         page = None
+
         try:
+            # 🧠 1. Create and navigate page safely
             page = await self._pw_context.new_page()
             await page.goto(url, timeout=45000, wait_until="domcontentloaded")
+
+            # ⏳ 2. Light buffer for dynamic load completion
             await page.wait_for_timeout(3000)
 
+            # 🖱️ 3. Initial light scroll (triggers JS/lazy-loads before capture)
             for _ in range(3):
-                await page.evaluate("window.scrollBy(0, window.innerHeight)")
-                await page.wait_for_timeout(800)
+                try:
+                    await page.evaluate("window.scrollBy(0, window.innerHeight)")
+                    await page.wait_for_timeout(800)
+                except Exception:
+                    break  # If page navigates mid-scroll, skip remaining scrolls
 
+            # 📸 4. Full-page screenshot if capture requested
             if capture:
                 base_dir = "/Users/shrey24/Desktop/mira_screens/buying"
                 os.makedirs(base_dir, exist_ok=True)
                 base_path = os.path.join(base_dir, f"buying_{int(time())}")
                 screenshot_path = await self._scroll_and_capture_full_page(page, base_path)
 
+            # 🧾 5. Extract HTML
             html = await page.content()
             print(f"✅ [DEBUG] Scraped successfully: {url}")
             return html or "", screenshot_path
+
         except Exception as e:
             logger.log_error(e, context=f"BuyingAgent._scrape_with_playwright ({url})")
             return "", None
+
         finally:
+            # 🧹 6. Always close the tab cleanly
             if page:
                 try:
                     await page.close()
@@ -398,6 +533,73 @@ class BuyingAgent:
             if domain_trust.intent_trust_weight(domain_trust.host(l["url"]), intent, query) > 0
         ]
         return trusted or ranked[:top_k]
+    # ======================================================
+    # 🔹 Variant-Aware Product Filter (Generic)
+    # ======================================================
+    def _extract_tokens(self, s: str) -> list[str]:
+        """Normalize and split string into clean alphanumeric tokens."""
+        s = re.sub(r"[^a-zA-Z0-9]+", " ", s.lower())
+        return [t for t in s.split() if len(t) > 1]
+
+    def _semantic_overlap(self, a: list[str], b: list[str]) -> float:
+        """Compute semantic similarity between token sets."""
+        return len(set(a) & set(b)) / max(1, len(set(a) | set(b)))
+
+    def _variant_tokens(self, query_tokens: list[str]) -> set[str]:
+        """
+        Infer differentiator / model-variant tokens from the query itself.
+        Works for all product types — e.g.:
+        'm4 macbook pro' → {'m4', 'pro'}
+        'rtx 4070 ti super' → {'4070', 'ti', 'super'}
+        'air jordan 4 retro' → {'4', 'retro'}
+        """
+        variant_pattern = r"\d|pro|max|ultra|plus|mini|super|ti|edition|gen|series|model|mark|ver|pack|set|volume|kit"
+        return {t for t in query_tokens if re.search(variant_pattern, t)}
+
+    def _is_variant_conflict(self, query: str, text: str) -> bool:
+        """
+        Check whether a result text likely refers to a conflicting variant/model.
+        e.g. query='m4 macbook pro' → drop 'm4 pro macbook pro'
+        """
+        q_toks = self._extract_tokens(query)
+        x_toks = self._extract_tokens(text)
+        query_variants = self._variant_tokens(q_toks)
+        if not query_variants:
+            return False
+
+        for tok in x_toks:
+            for qv in query_variants:
+                # Disallow variant prefixes/suffixes that alter the base model
+                if tok.startswith(qv) and tok != qv:
+                    return True
+        return False
+
+    def _filter_model_relevance(self, query: str, site_results: list[dict]) -> list[dict]:
+        """
+        Filter site results semantically — keep only those matching the user’s
+        model and variant intent. Generic across all product categories.
+        """
+        q_toks = self._extract_tokens(query)
+        kept = []
+        for s in site_results:
+            snippet = (s.get("text", "") + " " + s.get("url", "")).lower()
+
+            # skip obviously irrelevant content
+            if self._semantic_overlap(q_toks, self._extract_tokens(snippet)) < 0.4:
+                continue
+
+            # skip conflicting variant models (e.g. M4 Pro vs M4 base)
+            if self._is_variant_conflict(query, snippet):
+                continue
+
+            kept.append(s)
+
+        if not kept:
+            print("⚠️ [DEBUG] No strict matches found; using all results as fallback.")
+            kept = site_results
+
+        return kept
+
 
     # ======================================================
     # 🔹 Concurrent gather
@@ -415,31 +617,42 @@ class BuyingAgent:
     # ======================================================
     async def _multi_vision_summarize(self, query: str, site_results: list[dict]) -> str:
         """
-        Summarize extracted product / stock / deal info across sites with optional screenshots.
+        Summarize and fuse multi-source product insights (including prices, specs, and rankings).
+        Prioritizes accurate price detection using both text and screenshots.
         Uses GPT-4o for multimodal synthesis.
         """
         if not self.llm_facts:
             return "LLM unavailable."
+        
+        # 🧩 Filter out irrelevant or conflicting model variants before summarization
+        site_results = self._filter_model_relevance(query, site_results)
 
         def _clean_snippet(text: str) -> str:
             text = re.sub(r"[*•\-\n\t\r]+", " ", text)
             text = re.sub(r"https?://\S+", "", text)
+            #remove 'Save $200' / 'Discount $61' / '$300 off'
+            text = re.sub(r"\b(save|discount|off|savings|reduced)\s*\$?\s?\d+[0-9,]*", "", text, flags=re.I)
             text = re.sub(r"\s{2,}", " ", text)
             return text.strip()
-
+        
+        # --- Enhanced system prompt ---
         system_prompt = (
-            "You are Mira, a calm, trustworthy commerce assistant.\n"
-            "- Extract and restate only useful insights about products, prices, deals, or stocks.\n"
-            "- Summarize findings naturally in 2–3 sentences, no lists or markdown.\n"
-            "- If multiple sources agree, say so collectively.\n"
-            "- Mention brands, tickers, or stores naturally if clear (e.g., 'On Amazon...', 'CNBC notes...').\n"
-            "- Ignore ads, cookie popups, or newsletter prompts.\n"
-            "- Keep tone conversational yet precise."
-        )
+        "You are Mira, a sharp and insightful product analyst.\n"
+        "- Base every statement strictly on the provided extracts and screenshots — do not rely on prior or external knowledge.\n"
+        "- Identify each product and extract the *final selling price* currently visible.\n"
+        "- Ignore text like 'Save $200', 'Discount $50', or 'Deal price' — those are reductions, not the actual price.\n"
+        "- Prioritize what you see in screenshots for price accuracy, and read nearby text for reviewer sentiment or short evaluations.\n"
+        "- Summarize not just prices, but also *why* these products are praised or criticized — mention aspects like design, performance, battery life, portability, value, or ecosystem benefits when clearly mentioned.\n"
+        "- If multiple models appear (e.g., M4 vs M5 MacBook), highlight the differences or improvements reviewers emphasize — never speculate.\n"
+        "- Mention trustworthy sources naturally (e.g., 'CNET highlights...', 'Amazon reviewers praise...').\n"
+        "- Stay objective and concise — about 4–6 compact sentences, no markdown, no lists, no filler."
+    )
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"User asked: {query}\nReview all extracts and screenshots for key facts.")
+
+
+        messages = [SystemMessage(content=system_prompt)]
+        consolidated_content = [
+            {"type": "text", "text": f"User asked: {query}\nHere are extracts and screenshots from product/review sites:"}
         ]
 
         for s in site_results:
@@ -448,30 +661,59 @@ class BuyingAgent:
                 url = s.get("url", "")
                 domain = url.split("/")[2] if "://" in url else url
 
-                # 🖼️ Include screenshot if present
+                # 🧩 Extract numeric price snippets (case-insensitive for $, US$, USD)
+                price_snippet = re.findall(r"(?:US?\$|USD\s*)[0-9][0-9,]*(?:\.\d{2})?", clean_text, flags=re.I)
+                if price_snippet:
+                    consolidated_content.append({
+                        "type": "text",
+                        "text": f"Detected visible prices on {domain}: {', '.join(price_snippet)}"
+                    })
+
+                # 🖼️ Include screenshot (with visual price guidance)
                 ss_path = s.get("screenshot_path")
                 if ss_path and os.path.exists(ss_path):
                     try:
                         with open(ss_path, "rb") as f:
                             img_b64 = base64.b64encode(f.read()).decode("utf-8")
-                        messages.append(
-                            HumanMessage(content=[
-                                {"type": "text", "text": f"Screenshot from {domain} — analyze visible product details or charts."},
-                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
-                            ])
-                        )
+
+                        # If no prices found in text, guide model to inspect screenshot visually
+                        if not price_snippet:
+                            consolidated_content.append({
+                                "type": "text",
+                                "text": f"No explicit price text detected on {domain}, but check screenshot visually for price tags."
+                            })
+
+                        consolidated_content.append({
+                            "type": "text",
+                            "text": f"Screenshot from {domain} — visually identify laptop names and price tags. "
+                                    "If the screenshot and text disagree, trust the image for the price."
+                        })
+                        consolidated_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{img_b64}"}
+                        })
+                    except FileNotFoundError:
+                        print(f"⚠️ [DEBUG] Screenshot missing at {ss_path}, skipping image for {domain}")
                     except Exception as e:
                         logger.log_error(e, context=f"BuyingAgent._multi_vision_summarize.imgload {domain}")
 
-                messages.append(HumanMessage(content=f"Extracted text from {domain}:\n{clean_text}"))
+                # 📋 Include text content
+                consolidated_content.append({
+                    "type": "text",
+                    "text": f"Extracted from {domain}:\n{clean_text}\n"
+                })
+
             except Exception as e:
                 logger.log_error(e, context=f"BuyingAgent._multi_vision_summarize.cleanloop {s.get('url')}")
 
+        messages.append(HumanMessage(content=consolidated_content))
+
+        # --- GPT-4o Summarization ---
         try:
             resp = self.llm_facts.invoke(messages)
             text = (resp.content or "").strip()
 
-            # --- Cleanup
+            # Clean residual formatting artifacts
             text = re.sub(r"https?://\S+", "", text)
             text = re.sub(r"[\*\•\_\#\-\=\~\>\|`]+", " ", text)
             text = re.sub(r"<[^>]+>", " ", text)
@@ -482,7 +724,8 @@ class BuyingAgent:
 
         except Exception as e:
             logger.log_error(e, context="BuyingAgent._multi_vision_summarize.invoke_fail")
-            return "I couldn’t summarize the results right now."
+            return "I couldn’t summarize the pricing details right now."
+
 
 
     # ======================================================
