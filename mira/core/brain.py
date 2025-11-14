@@ -40,6 +40,8 @@ from mira.agents.planner_agent import PlannerAgent
 # 🆕 Centralized domain trust/scoring
 from mira.core.domain_trust import host, resolve_target_date, intent_from_query, score_link
 from mira.core import domain_trust
+from mira.ui.avatar import MiraAvatar
+
 # ----------------------------------------------------------------------
 # Clients
 # ----------------------------------------------------------------------
@@ -248,6 +250,7 @@ _booking = BookingAgent()
 _buying = BuyingAgent()
 _planner = PlannerAgent()
 
+avatar: MiraAvatar | None = None
 # ----------------------------------------------------------------------
 # Memory
 # ----------------------------------------------------------------------
@@ -281,12 +284,79 @@ def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     # --- Direct keyword routing (before LLM) ---
     if not intent:
+        # 💬 Messaging (text, whatsapp, imessage, dm)
+        if any(w in prompt for w in ["text", "whatsapp", "imessage", "message", "dm"]):
+            intent = "whatsapp"
+
+        # 📧 Email
+        elif "email" in prompt or "mail" in prompt or re.search(r"\bsend (an )?email\b", prompt):
+            intent = "email"
+
+        # 📅 Calendar & Scheduling
+        elif any(
+            phrase in prompt
+            for phrase in [
+                "calendar", "schedule", "meeting", "invite",
+                "appointment", "reminder", "agenda",
+                "what do i have", "what do we have",
+                "anything planned", "anything scheduled",
+                "do i have", "do we have",
+                "have scheduled", "have planned",
+                "show my schedule", "show our schedule",
+                "availability"
+            ]
+        ):
+            intent = "calendar"
+
+        # 🆕 Booking (tickets, flights, reservations)
+        elif any(w in prompt for w in [
+            "book flight", "flight to", "movie tickets", "reserve",
+            "reservation", "booking", "book table", "book tickets"
+        ]):
+            intent = "booking"
+
+        # 🆕 Buying (e-commerce / retail)
+        elif any(
+            w in prompt
+            for w in [
+                "buy", "order", "price of", "deal", "cheapest", "compare",
+                "under $", "under ₹", "discount", "shopping", "amazon",
+                "flipkart", "walmart", "costco", "target", "sale",
+                "add to cart", "order from", "cart"
+            ]
+        ):
+            intent = "buying"
+
+        # 🌆 Smart Planner (explore / discover / near me / events)
+        elif (
+            re.search(
+                r"(plan|suggest|find|explore|discover|recommend|what to do|where to go|things to do|near me\b|nearby|around me)",
+                prompt
+            )
+            and re.search(
+                r"(weekend|today|tonight|tomorrow|trip|outing|vacation|holiday|saturday|sunday|event|events|concert|festival|conference|meetup|startup|restaurant|place|bar|cafe|club|trail|park|museum|activity|walk|hike|itinerary)",
+                prompt
+            )
+        ) or any(
+            w in prompt
+            for w in [
+                "itinerary", "meetup", "eventbrite", "ticketmaster", "tripadvisor",
+                "luma", "yelp", "opentable", "thrillist", "timeout",
+                "bandsintown", "classpass", "mindbody", "yogatrail",
+                "instagram trends", "walking trail", "hiking spot",
+                "where to eat", "weekend plan", "nightlife", "networking event",
+                "startup event", "founder meetup", "tech conference"
+            ]
+        ) or "near me" in prompt or "around me" in prompt or "nearby" in prompt:
+            intent = "planner"
+
+
         # 📰 Hard news → search
-        if any(w in prompt for w in ["headline", "breaking", "latest news", "world news", "update"]):
+        elif any(w in prompt for w in ["headline", "breaking", "latest news", "world news", "update"]):
             intent = "search"
 
         # 🎤 Pop culture / celeb / entertainment (not music playback)
-        elif any(w in prompt for w in ["celebrity", "singer", "actor", "movie", "album", "died", "death"]):
+        elif any(w in prompt for w in ["celebrity", "singer", "actor", "movie", "died", "death"]):
             intent = "opinionated_answer"
 
         # 🎵 Music playback OR 🏟 Sports "playing"
@@ -297,62 +367,11 @@ def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "yesterday", "today"
             ]
             if any(w in prompt for w in sports_hints):
-                intent = "search"   # sports/game context
+                intent = "search"  # sports/game context
             elif any(w in prompt for w in ["song", "music", "track", "album", "playlist", "listen"]):
                 intent = "music"
             else:
                 intent = "music"
-
-        # 💬 Messaging
-        elif any(w in prompt for w in ["text", "whatsapp", "imessage", "message"]):
-            intent = "whatsapp"
-
-        # 📧 Email
-        elif "email" in prompt or "mail" in prompt:
-            intent = "email"
-
-        # 📅 Calendar & Scheduling (broadened)
-        elif any(
-            phrase in prompt
-            for phrase in [
-                "calendar", "schedule", "meeting",
-                "appointment", "reminder",
-                "what do i have", "what do we have",
-                "anything planned", "anything scheduled",
-                "do i have", "do we have",
-                "have scheduled", "have planned",
-                "show my schedule", "show our schedule"
-            ]
-        ):
-            intent = "calendar"
-
-        # 🆕 Booking
-        elif any(w in prompt for w in ["book flight", "flight to", "movie tickets", "reserve", "reservation", "booking"]):
-            intent = "booking"
-
-        # 🆕 Buying (E-commerce / retail products)
-        elif any(
-            w in prompt
-            for w in [
-                "buy", "order", "price of", "deal", "cheapest", "compare",
-                "under $", "under ₹", "discount", "shopping", "amazon",
-                "flipkart", "walmart", "costco", "target", "sale"
-            ]
-        ):
-            intent = "buying"
-
-        # 🌆 Smart Planner (broadened for “near me”, “explore”, “trails”, “restaurants”, etc.)
-        elif (
-            re.search(r"\b(plan|suggest|find|explore|discover|what to do|where to go|things to do|near me)\b", prompt)
-            and re.search(r"\b(weekend|today|tonight|tomorrow|trip|outing|vacation|holiday|saturday|sunday|event|concert|restaurant|place|bar|cafe|club|trail|park|museum|activity|walk|hike|itinerary)\b", prompt)
-        ) or any(
-            w in prompt
-            for w in [
-                "itinerary", "meetup", "eventbrite", "ticketmaster", "tripadvisor",
-                "yelp", "opentable", "thrillist", "timeout", "instagram trends", "walking trail", "hiking spot"
-            ]
-        ):
-            intent = "planner"
 
     # --- If still undecided, fall back to LLM classification ---
     if not intent:
@@ -365,9 +384,9 @@ def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     "- If user asks about headlines or breaking news → 'search'.\n"
                     "- Celebrities/entertainment → 'opinionated_answer'.\n"
                     "- 'play/listen/song' → 'music'.\n"
-                    "- 'text/message/whatsapp/imessage' → 'whatsapp'.\n"
+                    "- 'text/message/whatsapp/imessage/dm' → 'whatsapp'.\n"
                     "- 'email/mail' → 'email'.\n"
-                    "- 'calendar/schedule/meeting/event' → 'calendar'.\n"
+                    "- 'calendar/schedule/meeting/event/invite/reminder' → 'calendar'.\n"
                     "- Booking keywords (flight/movie/reserve) → 'booking'.\n"
                     "- Buying/comparison/deal/price → 'buying'.\n"
                     "- 'explore/discover/near me/itinerary/weekend/eventbrite/yelp/tripadvisor/trail/restaurant/activity' → 'planner'"
@@ -381,21 +400,25 @@ def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
         label = re.sub(r"[^a-z]", "", raw_label)
 
         synonyms = {
-            # WhatsApp
+            # WhatsApp / Messaging
             "msg": "whatsapp",
             "text": "whatsapp",
             "imessage": "whatsapp",
             "message": "whatsapp",
+            "dm": "whatsapp",
             "mail": "email",
 
             # Calendar
             "meeting": "calendar",
             "schedule": "calendar",
+            "invite": "calendar",
+            "event": "calendar",
 
             # Search
             "headline": "search",
             "breaking": "search",
             "news": "search",
+            "update": "search",
 
             # Opinionated
             "celebrity": "opinionated_answer",
@@ -406,20 +429,20 @@ def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "died": "opinionated_answer",
             "death": "opinionated_answer",
 
-            # Music (fixed)
+            # Music
             "song": "music",
             "play": "music",
             "listen": "music",
             "track": "music",
             "music": "music",
 
-            # 🆕 Booking
+            # Booking
             "booking": "booking",
             "bookflight": "booking",
             "movietickets": "booking",
             "reserve": "booking",
 
-            # 🆕 Buying
+            # Buying
             "buy": "buying",
             "order": "buying",
             "deal": "buying",
@@ -428,7 +451,7 @@ def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "priceof": "buying",
             "price": "buying",
 
-            # 🆕 Planner
+            # Planner
             "planner": "planner",
             "itinerary": "planner",
             "meetup": "planner",
@@ -512,86 +535,31 @@ def music_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def search_node(state: dict[str, any]) -> dict[str, any]:
     query = state["prompt"]
-
-    # ---- intent + date resolution ----
-    intent = intent_from_query(query)
-    target_date = resolve_target_date(query)
     bw = BrowserWorker(headless=True)
 
-    # ---- prime query for freshness ----
-    primed_q = query
-    if target_date and intent in ("sports", "finance", "news"):
-        primed_q = f"{query} {target_date.strftime('%b %d, %Y')}"
-    elif intent in ("sports", "finance", "news"):
-        primed_q = f"{query} today"
-
-    # ---- run search ----
+    # ---- trust-ranked discover (handles intent/date internally) ----
     try:
-        ans = bw.search_sync(primed_q, max_sites=8)
-        links = ans.get("links", [])
-        if not links:
-            ans = bw.search_sync(query, max_sites=8)
-            links = ans.get("links", [])
+        result = bw.discover_sync(query)
     except Exception as e:
-        logger.log_error(e, context="search_node.search")
-        links = []
+        logger.log_error(e, context="search_node.discover")
+        result = {"summary": "", "sources": []}
 
-    if not links:
-        state["result"] = f"Sorry {cfg.USER_NAME}, I couldn’t find results for “{query}.”"
-        return state
+    summary = result.get("summary", "").strip()
+    sources = result.get("sources", [])
 
-    # ---- rank and trust weighting ----
-    ranked = sorted(
-        links,
-        key=lambda l: domain_trust.score_link(
-            l.get("title", ""),
-            l.get("url", ""),
-            target_date,
-            intent,
-        ),
-        reverse=True,
-    )
-
-    trusted = [
-        l for l in ranked
-        if domain_trust.intent_trust_weight(
-            domain_trust.host(l.get("url", "")), intent, query
-        ) > 0
-    ]
-    if trusted:
-        ranked = trusted + [l for l in ranked if l not in trusted]
-
-    urls = [l["url"] for l in ranked[:5] if "url" in l]
-
-    # ---- summarization ----
-    summary = ""
-    try:
-        if intent in ("sports", "finance", "news"):
-            # multimodal vision summary via GPT-4o
-            summary = bw.multi_site_answer_sync(query, urls)
-        else:
-            # lightweight text-only extraction
-            snippets = []
-            for url in urls[:3]:
-                try:
-                    snippet = bw.smart_extract_sync(
-                        query, url, stateful=(intent in ("tech", "science"))
-                    ) or ""
-                    if snippet:
-                        snippets.append(snippet)
-                except Exception as e:
-                    logger.log_error(e, context=f"search_node.smart_extract {url}")
-            summary = " ".join(snippets[:2]) or "Here’s what I found."
-    except Exception as e:
-        logger.log_error(e, context="search_node.summary_phase")
-
+    # ---- fallback if empty ----
     if not summary:
-        summary = "Here’s what I found: " + "; ".join(urls[:3])
-
-    if target_date and intent == "sports":
-        summary = f"{summary} on {target_date.strftime('%b %d, %Y')}."
+        try:
+            ans = bw.search_sync(query, max_sites=5)
+            links = ans.get("links", [])
+            urls = [l.get("url", "") for l in links if "url" in l][:3]
+            summary = "Here’s what I found: " + "; ".join(urls)
+        except Exception as e:
+            logger.log_error(e, context="search_node.fallback_search")
+            summary = f"Sorry {cfg.USER_NAME}, I couldn’t find results for “{query}.”"
 
     state["result"] = summary
+    state["sources"] = sources
     return state
 
 
@@ -888,8 +856,10 @@ def whatsapp_node(state: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         res = {"ok": False, "error": str(e)}
 
+    # ✅ Always refer to the contact name (payload["to"]) instead of resolved number
     if payload.get("fn") == "send" and res.get("ok"):
-        state["result"] = f"Okay, I sent your WhatsApp to {res.get('to')}."
+        contact_name = payload.get("to", "your contact")
+        state["result"] = f"Okay, I sent your WhatsApp to {contact_name}."
     else:
         state["result"] = res.get("error", "Sorry, I couldn’t send the WhatsApp message.")
 
@@ -1022,19 +992,21 @@ graph = builder.compile()
 # Public API (single turn)
 # ----------------------------------------------------------------------
 def amma_brain(prompt: str) -> str:
-    """Single-turn brain: route, answer, and persist to memory."""
-    # 1. Build context from memory
+    """Single-turn brain: route, reason, and persist to memory."""
+    # 1️⃣ Build context from memory
     context_msgs = memory.build_context_messages(query=prompt, k=3)
 
-    # 2. Run the intent routing graph
+    # 2️⃣ Run the reasoning / intent routing graph
     final = graph.invoke({"prompt": prompt, "meta": {"context": context_msgs}})
     result = (final.get("result") or "").strip()
     if not result and not final.get("action_taken", False):
         result = f"Sorry {cfg.USER_NAME}, I couldn’t formulate a reply."
 
-    # 3. Save turn into memory
+    # 3️⃣ Persist to memory
     memory.save_turn(user_text=prompt, assistant_text=result)
+
     return result
+
 
 def clear_memory(short_only: bool = False):
     """Expose reset hooks for memory hygiene."""
@@ -1061,31 +1033,43 @@ def _append_followup(text: str, is_last_turn: bool = False) -> str:
 
 
 def run_interaction(initial_text: str, max_turns: int = 3) -> None:
-    """
-    Handle the first query + up to (max_turns-1) short follow-ups.
-    After that, return to wakeword idle (no persistent hot mic).
-    """
     text = (initial_text or "").strip()
     if not text:
         return
 
     turns = 0
     while turns < max_turns and text:
-        # Generate an answer (this persists memory internally)
+        # 🧠 Generate response
         answer = amma_brain(text)
 
-        # Add a follow-up prompt on all but the last turn
         if answer and isinstance(answer, str):
             to_say = _append_followup(answer, is_last_turn=(turns >= max_turns - 1))
-            cartesia.speak(to_say)   # ✅ barge-in friendly
+
+            # 🎙️ Avatar + TTS
+            if avatar:
+                avatar.set_mode("speaking")
+
+            if getattr(cartesia, "is_playing", False):
+                cartesia.stop()
+
+            cartesia.speak(to_say)
+
+            if avatar:
+                avatar.set_mode("idle")
 
         turns += 1
         if turns >= max_turns:
             break
 
-        # Short follow-up window: listen briefly for a chained query
+        # 🎧 Short follow-up
+        if avatar:
+            avatar.set_mode("listening")
+
         window_s = getattr(cfg, "FOLLOWUP_WINDOW_S", 6)
         follow = stt.listen_once_ink(timeout_s=window_s)
+
+        if avatar:
+            avatar.set_mode("thinking")
 
         if not follow:
             break
@@ -1094,7 +1078,7 @@ def run_interaction(initial_text: str, max_turns: int = 3) -> None:
         if not clean:
             break
 
-        print(f"[DEBUG] Follow-up heard: '{clean}'")  # 👈 helps debug why Mira keeps talking
+        print(f"[DEBUG] Follow-up heard: '{clean}'")
 
         norm = clean.lower()
         stop_words = {
@@ -1110,5 +1094,6 @@ def run_interaction(initial_text: str, max_turns: int = 3) -> None:
         if getattr(cfg, "FOLLOWUP_WAKE_WORD_OK", True) and norm.startswith("amma"):
             break
 
-        # Continue with clean follow-up
+        # 🔁 Continue loop
         text = clean
+

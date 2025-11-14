@@ -4,54 +4,223 @@ from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 import geocoder 
 
-# ---- Domain trust maps -----------------------------------------------------
+# ================================================================
+# 🌐 Domain Trust Maps (Updated 2025 Edition)
+# ================================================================
+
+# ---- Sports -----------------------------------------------------
 TRUSTED_SPORTS = {
     "espn.com": 6, "nfl.com": 6, "cbssports.com": 5, "sports.yahoo.com": 5,
     "theathletic.com": 4, "si.com": 4, "foxsports.com": 4, "nbcsports.com": 4,
 }
+
+# ---- Retail / Shopping ------------------------------------------
 TRUSTED_SHOPS = {
-    "amazon.com": 6,
+    # 🏪 Core Retailers
     "apple.com": 6,
     "target.com": 4,
     "bhphotovideo.com": 4,
     "costco.com": 4,
     "flipkart.com": 5,
     "reliancedigital.in": 5,
+
+    # 👟 Sneakers / Fashion
+    "stockx.com": 6,
+    "goat.com": 6,
+    "farfetch.com": 5,
+    "ssense.com": 5,
+    "onitsukatiger.com": 5,
+    "nike.com": 5,
+    "adidas.com": 5,
+    "puma.com": 4,
+    "footlocker.com": 4,
+
+    # 💻 Certified Refurb & Used Tech
+    "apple.com": 6,             # Certified Refurbished section
+    "dellrefurbished.com": 6,
+    "lenovo.com": 5,
+    "hp.com": 5,
+    "reebelo.com": 6,
+    "backmarket.com": 5,
+    "refurbed.com": 5,
+    "refurbed.eu": 5,
+    "gazelle.com": 4,
+    "swappa.com": 4,
+    "refurb.me": 3,
+    "bestbuy.com": 3,
+    "amazon.com": 3,            # renewed products
+
+    # 🗽 Regional Refurb (US / NYC)
+    "paymore.com": 5,
+    "computeroverhauls.com": 5,
+    "techable.com": 6,
+    "plugtech.com": 5,
+    "pcliquidations.com": 4,
+
+    # 🧭 Added — Consumer Tech Review / Comparison / Retail Guides
+    "cnet.com": 5,
+    "techradar.com": 5,
+    "tomsguide.com": 5,
+    "laptopmag.com": 5,
+    "digitaltrends.com": 5,
+    "theverge.com": 5,
+    "wired.com": 5,
+    "arstechnica.com": 4,
+    "rtings.com": 5,
+    "notebookcheck.net": 5,
+    "pocket-lint.com": 4,
+    "trustedreviews.com": 4,
+    "consumerreports.org": 5,
+    "techspot.com": 4,
+    "pcmag.com": 5,
+    "newegg.com": 5,
+    "microcenter.com": 5,
 }
+
+
+# ---- News / Media -----------------------------------------------
 TRUSTED_NEWS = {
     "reuters.com": 6, "apnews.com": 6, "bloomberg.com": 6, "wsj.com": 6, "ft.com": 6,
     "nytimes.com": 5, "theguardian.com": 5, "washingtonpost.com": 5,
     "bbc.com": 5, "npr.org": 5, "economist.com": 5,
     "aljazeera.com": 4, "time.com": 4, "axios.com": 4, "semafor.com": 4,
 }
+
+# ---- Finance ----------------------------------------------------
 TRUSTED_FINANCE = {
     "cnbc.com": 6, "marketwatch.com": 5, "barrons.com": 5, "seekingalpha.com": 4,
     "investopedia.com": 4, "morningstar.com": 4, "nasdaq.com": 4,
-    "fool.com": 3, "yahoo.com": 4,  # (finance vertical)
-}
-TRUSTED_TECH_NEWS = {
-    "techcrunch.com": 4, "theverge.com": 4, "arstechnica.com": 4,
-    "engadget.com": 3, "wired.com": 4,
+    "fool.com": 3, "yahoo.com": 4,
 }
 
-# Forums / low-signal for prices/news (we still might show them, but de-prioritize hard)
+# ---- Tech / Startup News ----------------------------------------
+TRUSTED_TECH_NEWS = {
+    # 🧠 Core Tech & Startup Journalism (Tier 5–6)
+    "techcrunch.com": 6, "wired.com": 5, "theverge.com": 5, "arstechnica.com": 5,
+    "venturebeat.com": 5, "axios.com": 5, "bloomberg.com": 5,
+    "reuters.com": 5, "cnbc.com": 5,
+
+    # 💡 Product / Consumer / Ecosystem (Tier 4)
+    "engadget.com": 4, "cnet.com": 4, "fastcompany.com": 4, "theinformation.com": 4,
+    "businessinsider.com": 4, "fortune.com": 4, "protocol.com": 4,
+    "techradar.com": 4, "zdnet.com": 4,
+
+    # 🕹️ Gaming / Entertainment Tech (Tier 3–4)
+    "ign.com": 4, "gamespot.com": 4, "pcgamer.com": 4,
+    "polygon.com": 4, "gameinformer.com": 3,
+
+    # 🤖 AI / Developer / Research (Tier 3–4)
+    "semianalysis.com": 4, "huggingface.co": 4, "a16z.com": 4,
+    "openai.com": 4, "anthropic.com": 4, "developers.googleblog.com": 4,
+    "aws.amazon.com": 4, "deeplearning.ai": 3,
+    "paperswithcode.com": 3, "importai.com": 3, "towardsdatascience.com": 3,
+    "github.blog": 3, "meta.ai": 3,
+
+    # 🚀 Startup Aggregators / Community (Tier 2–3)
+    "producthunt.com": 3, "ycombinator.com": 3, "crunchbase.com": 3,
+}
+
+# ---- Local Events / Activities / Planner ------------------------
+TRUSTED_PLANNER = {
+    # 🎟️ Event Discovery / Booking
+    "eventbrite.com": 6,
+    "luma.com": 6,
+    "meetup.com": 6,
+    "ticketmaster.com": 6,
+    "dice.fm": 5,
+    "seatgeek.com": 5,
+    "bandsintown.com": 5,
+    "stubhub.com": 5,
+    "feverup.com": 5,
+    "allevents.in": 5,
+    "bookmyshow.com": 5,
+    "10times.com": 4,
+    "everfest.com": 4,
+
+    # 🌆 Local City Guides / Magazines
+    "timeout.com": 6,
+    "thrillist.com": 5,
+    "do312.com": 5,
+    "do617.com": 5,
+    "do512.com": 5,
+    "nycgo.com": 5,
+    "sfstation.com": 5,
+    "discoverlosangeles.com": 5,
+    "lonelyplanet.com": 4,
+    "matadornetwork.com": 4,
+
+    # 🍽 Food / Dining / Lifestyle
+    "yelp.com": 5,                # ⬆️ covers restaurants + nightlife
+    "eater.com": 5,
+    "zomato.com": 5,
+    "opentable.com": 5,
+    "resy.com": 5,
+    "michelinguide.com": 5,
+    "tripadvisor.com": 4,
+    "exploretock.com": 4,
+    "timeout.com/food": 5,        # food vertical
+    "thrillist.com/eat": 5,
+
+    # 🎭 Arts / Culture / Theatre
+    "broadway.com": 5,
+    "todaytix.com": 5,
+    "artforum.com": 4,
+    "metmuseum.org": 4,
+    "moma.org": 4,
+    "smithsonianmag.com": 4,
+    "artsandculture.google.com": 4,
+
+    # 🧘‍♂️ Fitness / Wellness / Workshops
+    "classpass.com": 5,
+    "mindbodyonline.com": 5,
+    "fitternity.com": 4,
+    "cult.fit": 4,
+    "yogatrail.com": 4,
+    "wellnessliving.com": 4,
+
+    # 🌃 Nightlife / Entertainment
+    "residentadvisor.net": 5,
+    "ra.co": 5,
+    "songkick.com": 5,
+    "bandsintown.com": 5,
+    "timeout.com/nightlife": 5,
+    "edmtrain.com": 4,
+    "clubbookers.com": 3,
+
+    # 🗺️ Regional Event Aggregators / Lifestyle
+    "eventseeker.com": 4,
+    "discover.events.com": 4,
+    "visitdubai.com": 4,
+    "visitsingapore.com": 4,
+    "visitlondon.com": 4,
+    "visitphilly.com": 4,
+}
+
+
+# ---- Untrusted / Low Signal -------------------------------------
 UNTRUSTED = {
     "reddit.com": -12, "old.reddit.com": -12, "quora.com": -12,
-    "pinterest.com": -8, "tumblr.com": -6, "medium.com": -3,   # Medium varies; keep mild penalty
-    "9to5mac.com": -2,  # sometimes newsy but often rumor-y for prices
-    "macrumors.com": -2,  # rumor-heavy; keep mild
-    "walmart.com": -8,
-    "bestbuy.com": -8,
+    "pinterest.com": -8, "tumblr.com": -6, "medium.com": -3,
+    "9to5mac.com": -2, "macrumors.com": -2,
+    "walmart.com": -8,  # Overly price-scraped, low signal
+
+    # 🚫 Peer-to-peer used / risky marketplaces
+    "ebay.com": -4,
+    "craigslist.org": -10,
+    "facebook.com": -8,  # Marketplace
 }
 
+# ================================================================
+# Existing regexes / constants (keep from your file)
+# ================================================================
 _FORUM_HINTS = ("forum.", "/forum", "/forums/", "/community/", "/thread/", "/threads/")
 _VIDEO_HINTS = ("/video/", "youtube.com", "youtu.be", "v.redd.it")
-
 _DATE_WORD = re.compile(
     r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\w*\s+\d{1,2},?\s+\d{4}"
     r"|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\w*,?\s+\d{4})",
     re.I
 )
+
 
 # ---- Helpers ---------------------------------------------------------------
 def _season_anchor(sport: str, year: int) -> date:
@@ -254,7 +423,7 @@ def intent_from_query(q: str) -> str:
 
     # 🔥 Trending / Viral / Social
     if any(k in t for k in (
-        "trending", "viral", "popular", "new", "latest trends", "buzzing",
+        "trending", "viral", "popular", "latest trends", "buzzing",
         "instagram", "tiktok", "youtube", "reel", "social media"
     )):
         return "trending"
@@ -264,7 +433,6 @@ def intent_from_query(q: str) -> str:
 
 
 def intent_trust_weight(host: str, intent: str, query: str = "") -> int:
-    """Assign trust weight for a host depending on intent."""
     host = host.lower()
     q = (query or "").lower()
 
@@ -279,6 +447,8 @@ def intent_trust_weight(host: str, intent: str, query: str = "") -> int:
         return max(TRUSTED_FINANCE.get(host, 0), TRUSTED_NEWS.get(host, 0))
     if intent == "news":
         return max(TRUSTED_NEWS.get(host, 0), TRUSTED_TECH_NEWS.get(host, 0))
+    if intent in ("activities", "events", "food", "restaurant", "outdoors", "nightlife", "networking", "startup", "conference", "meetup"):
+        return TRUSTED_PLANNER.get(host, 0)
 
     return max(
         TRUSTED_SPORTS.get(host, 0),
@@ -286,7 +456,9 @@ def intent_trust_weight(host: str, intent: str, query: str = "") -> int:
         TRUSTED_NEWS.get(host, 0),
         TRUSTED_FINANCE.get(host, 0),
         TRUSTED_TECH_NEWS.get(host, 0),
+        TRUSTED_PLANNER.get(host, 0),
     )
+
 
 def score_link(title: str, url: str, target_date, intent: str) -> float:
     """Final weighted score for ranking links."""
@@ -418,8 +590,8 @@ def expand_query(intent: str, query: str = "") -> str:
         ]
         retail_hints = [
             "buy", "order", "deal", "discount", "coupon", "shopping",
-            "amazon", "flipkart", "walmart", "target", "costco",
-            "best buy", "specs", "product", "laptop", "phone", "watch"
+            "amazon", "flipkart", "target", "costco", "specs", "product",
+            "laptop", "phone", "watch"
         ]
 
         is_finance_query = any(k in q for k in finance_hints) and not any(k in q for k in retail_hints)
@@ -433,13 +605,18 @@ def expand_query(intent: str, query: str = "") -> str:
         else:
             current_year = datetime.now().year
             expansions += [
-                "current price", "latest model", "buy online", "available now",
-                "new release", f"{current_year}", f"{current_year} model",
-                "official site", "authentic product", "launch edition",
-                "user ratings", "specifications", "compare Amazon Flipkart"
-            ]
-            trusted_retailers = ["Amazon", "Flipkart", "Apple", "Target", "Costco", "B&H", "Reliance Digital"]
-            expansions += trusted_retailers
+        "current price", "latest model", "buy online", "available now",
+        "new release", f"{current_year}", f"{current_year} model",
+        "official site", "authentic product", "user ratings",
+        "customer reviews", "specifications", "buying guide",
+        "best deals", "price comparison", "battery life", "performance test"
+    ]
+
+
+            # 🧠 Optional refurb bias — only if user query hints at refurb/used
+            if any(k in q for k in ("used", "refurb", "renewed", "pre-owned")):
+                expansions += ["certified refurbished", "factory renewed", "used tech deals"]
+
 
 
     # ----------------------------
@@ -454,7 +631,6 @@ def expand_query(intent: str, query: str = "") -> str:
         combined = list(dict.fromkeys(expansions))
 
     return " ".join(combined)
-
 
 
 
