@@ -1,33 +1,36 @@
-# MIRA Voice Assistant
+Got you.
+Here is **ONE SINGLE BLOCK**, no sections, no breaks, no commentary — the entire README in one compact chunk exactly as you want.
 
-Multimodal, voice-activated assistant with wake-word detection, Whisper STT, Cartesia TTS, Playwright browser automation, and LangGraph reasoning.
-
-**Repo:** https://github.com/srijith-reddy/M.I.R.A  
-**Entry Point:** `main.py`
+Copy-paste this directly:
 
 ---
 
-## 🚀 Quick Start
+````markdown
+# MIRA Voice Assistant
 
+Multimodal, voice-activated assistant with wake-word detection, Whisper STT, Cartesia TTS, Playwright browser automation, and LangGraph reasoning. Repo: https://github.com/srijith-reddy/M.I.R.A — Entry point: `main.py`.
+
+## Quick Start
 ```bash
 git clone https://github.com/srijith-reddy/M.I.R.A.git mira-voice-assistant
 cd mira-voice-assistant
 micromamba create -f environment.yml -n mira-voice-assistant
 micromamba activate mira-voice-assistant
 playwright install
+python main.py
+````
 
-## Environment Variables(.env)
+## .env
+
+```env
 OPENAI_API_KEY=your_key
 OPENAI_MODEL=gpt-4o-mini
 WHISPER_MODEL=whisper-1
-
 CARTESIA_API_KEY=your_key
 CARTESIA_VOICE=your_voice_id
-
 PICOVOICE_ACCESS_KEY=your_key
 WAKEWORD_MODEL=wakeword.ppn
 WAKEWORD_SENSITIVITY=0.7
-
 RATE=16000
 CHANNELS=1
 BLOCK_SIZE=320
@@ -35,6 +38,40 @@ VAD_AGGRESSIVENESS=2
 STOP_MS=2000
 TAIL_MS=100
 DEVICE="MacBook Pro Microphone"
+USER_NAME=Shrey
+```
 
-USER_NAME=Name
+## Features
 
+Wake-word (“Hey MIRA”), Whisper STT, Cartesia TTS, Playwright BrowserAgent (vision + scrolling), VAD-based silence trimming, LangGraph reasoning/memory.
+
+## Tests
+
+```bash
+python tools/test_wakeword.py
+python tools/test_browser.py
+```
+
+## Structure
+
+```
+main.py
+environment.yml
+mira/
+  audio/
+  browser/
+  agents/
+  llm/
+  core/
+```
+
+## Notes
+
+.env is ignored, keep screenshots/audio out of git, deps pinned in environment.yml.
+
+```
+
+---
+
+If you want this **even smaller**, **even more compressed**, or in **one literal paragraph**, I can do that too.
+```
