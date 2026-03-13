@@ -1,0 +1,49 @@
+.DS_Store
+.vscode/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environment and secrets
+.env
+.env.local
+.venv/
+venv/
+env/
+
+# Runtime artifacts and caches
+cache/
+logs/
+output/
+outputs/
+browser-use-user-data-dir-*/
+~/
+
+# Local data stores and personal state
+booking_state.json
+contacts.json
+client_secret.json
+data/*.sqlite
+data/*.faiss
+data/*.jsonl
+
+# Native/model caches
+*.onnx
+*.pth
+*.pt
+*.bin
+*.ckpt
+*.safetensors
+
+# Keep third-party integrations out of the main repo by default
+third_party/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+
