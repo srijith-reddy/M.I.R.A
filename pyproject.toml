@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mira"
+version = "0.2.0"
+description = "MIRA v2 — voice-first agent with typed tools"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "MIRA" }]
+dependencies = [
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "platformdirs>=4.2",
+    "python-dotenv>=1.0",
+    "openai>=1.40",
+    "deepgram-sdk>=3.7",
+    "cartesia>=1.0",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12",
+    "numpy>=1.26",
+    "webrtcvad-wheels>=2.0.14",
+    "pvporcupine>=3.0",
+    "pvrecorder>=1.2",
+    "playwright>=1.40",
+    "httpx>=0.25",
+    "websockets>=12",
+    "sqlite-vec>=0.1.6",
+    "diskcache>=5.6",
+    "rank_bm25>=0.2.2",
+    "crawl4ai>=0.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+# `pip install .[bundle]` then `python setup_app.py py2app`. Kept optional
+# because py2app pulls in setuptools machinery most dev machines don't need
+# and it's mac-only.
+bundle = [
+    "py2app>=0.28",
+    "setuptools>=68",
+]
+# Optional alternate LLM providers. Groq uses the OpenAI SDK (no extra dep);
+# Anthropic needs its own SDK. Install with `pip install .[providers]` to
+# enable Claude-based routes.
+providers = [
+    "anthropic>=0.40",
+]
+# Free local wake-word backend. Install with `pip install .[wakeword-oss]`
+# when you don't want to use Picovoice Porcupine. Backend is chosen at
+# runtime via WAKEWORD_BACKEND (auto|porcupine|openwakeword).
+wakeword-oss = [
+    "openwakeword>=0.6",
+    "onnxruntime>=1.16",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[project.scripts]
+mira = "mira.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mira"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]

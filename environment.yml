@@ -1,0 +1,69 @@
+name: mira-voice-assistant
+channels:
+  - conda-forge
+dependencies:
+  # Base runtime
+  - python=3.11
+  - pip>=24.2
+  - ffmpeg
+  - numpy
+  - scipy
+  - requests
+  - certifi
+  - openssl
+  - brotli
+  - libffi
+  - zlib
+  - sqlite
+
+  # Pip-managed packages (for pure Python + AI/Audio libs)
+  - pip:
+      # Core AI + LLMs
+      - openai>=1.99.2,<2.0.0
+      - tiktoken==0.8.0
+      - langchain==0.3.7
+      - langchain-community==0.3.7
+      - langchain-openai==0.3.2
+      - langgraph==0.2.38
+      - faiss-cpu==1.9.0
+
+      # Browser & scraping
+      - browser-use==0.7.7
+      - playwright==1.55.0
+      - beautifulsoup4==4.12.3
+      - scrapy==2.11.1
+      - lxml>=5.3.0
+      - html5lib==1.1
+      - aiofiles==24.1.0
+
+      # Voice + audio stack
+      - pyaudio
+      - sounddevice==0.5.1
+      - soundfile==0.13.0
+      - webrtcvad-wheels==2.0.14
+      - pvporcupine==3.0.5
+      - cartesia==2.0.8
+      - websocket-client==1.8.0
+      - inflect==7.0.0
+      - psutil>=5.9.0
+      - shutilwhich==1.1.0
+      - python-dotenv==1.0.1
+
+      # Scientific / math
+      - scipy>=1.14.0
+      - numpy>=1.26.0
+
+      # Google API & OAuth
+      - google-api-python-client>=2.174.0
+      - google-auth>=2.40.3
+      - google-auth-oauthlib>=1.2.2
+      - google-auth-httplib2==0.2.0
+
+      # Utilities
+      - setuptools<81
+      - rich
+      - tqdm
+      - orjson
+      - aiohttp
+      - nest-asyncio
+
