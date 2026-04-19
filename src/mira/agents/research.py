@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 
+from mira.agents._history import prepend_history
 from mira.agents.base import Agent
 from mira.config.settings import get_settings
 from mira.obs.logging import log_event
@@ -107,10 +108,11 @@ class ResearchAgent(Agent):
                 f"{question}\n\n[memory]\n{_json.dumps(mem, ensure_ascii=False)}"
             )
 
-        messages = [
+        messages: list[Message] = [
             Message(role="system", content=_SYSTEM),
-            Message(role="user", content=user_content),
         ]
+        prepend_history(messages, req.context)
+        messages.append(Message(role="user", content=user_content))
 
         def _call() -> str:
             resp = llm().complete(

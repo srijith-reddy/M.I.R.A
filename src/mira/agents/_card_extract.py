@@ -32,6 +32,7 @@ import json
 import re
 from typing import Any
 
+from mira.agents._text import strip_markdown
 from mira.obs.logging import log_event
 from mira.runtime.llm import Message, llm
 
@@ -135,13 +136,10 @@ async def _extract_task(
     )
 
 
-_MD_EMPH = re.compile(r"(\*\*|__)(.+?)\1")
-
-
 def _strip_md(text: Any) -> Any:
     if not isinstance(text, str):
         return text
-    return _MD_EMPH.sub(r"\2", text).strip()
+    return (strip_markdown(text) or "").strip()
 
 
 def _strip_markdown_card(card: dict[str, Any], rows: list[dict[str, Any]]) -> None:

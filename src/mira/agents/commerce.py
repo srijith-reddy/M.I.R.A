@@ -5,6 +5,7 @@ from typing import Any
 
 from mira.agents._card_extract import spawn_card_extractor
 from mira.agents._dispatch import run_tool_calls
+from mira.agents._history import prepend_history
 from mira.agents.base import Agent
 from mira.config.settings import get_settings
 from mira.runtime.llm import Message, llm
@@ -85,8 +86,11 @@ class CommerceAgent(Agent):
     async def _run(self, req: AgentRequest) -> AgentResponse:
         messages: list[Message] = [
             Message(role="system", content=_SYSTEM),
-            Message(role="user", content=req.transcript.strip() or req.goal.strip()),
         ]
+        prepend_history(messages, req.context)
+        messages.append(
+            Message(role="user", content=req.transcript.strip() or req.goal.strip())
+        )
         tools = self._tool_schemas()
         # Accumulated across hops. Brave thumbnails get attached to card
         # rows in the post-hoc extractor — see spawn_card_extractor below.

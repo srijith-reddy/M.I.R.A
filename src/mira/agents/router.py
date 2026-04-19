@@ -145,6 +145,7 @@ class FastRouter:
         transcript: str,
         *,
         agents_catalog: list[dict[str, Any]],
+        prior_turn: dict[str, Any] | None = None,
     ) -> RouterDecision:
         model = self._router_model()
         with span("router.decide", n_agents=len(agents_catalog), model=model):
@@ -161,17 +162,38 @@ class FastRouter:
                     reason="regex smalltalk",
                 )
 
-            cached = _cache_get(norm)
-            if cached is not None:
-                log_event(
-                    "router.cache_hit", kind=cached.kind, agent=cached.agent
-                )
-                return cached
+            # Short utterances are highly ambiguous without context — "14
+            # inch M5 Pro" could be a spec clarification continuing a
+            # shopping thread or a standalone device query. Bypass the
+            # decision cache so the prior turn steers routing each time.
+            is_short_followup = len(norm) < 30 and prior_turn is not None
+            if not is_short_followup:
+                cached = _cache_get(norm)
+                if cached is not None:
+                    log_event(
+                        "router.cache_hit", kind=cached.kind, agent=cached.agent
+                    )
+                    return cached
 
             catalog_lines = "\n".join(
                 f"- {a['name']}: {a.get('purpose', '')}" for a in agents_catalog
             )
             system = _SYSTEM_PROMPT + "\n\nAvailable specialists:\n" + catalog_lines
+            if prior_turn is not None:
+                prior_q = (prior_turn.get("transcript") or "")[:200]
+                prior_a = (prior_turn.get("reply") or "")[:400]
+                prior_via = prior_turn.get("via") or ""
+                system += (
+                    "\n\nPrevious turn (for continuity):\n"
+                    f"  user: {prior_q}\n"
+                    f"  assistant: {prior_a}\n"
+                    f"  routed via: {prior_via}\n"
+                    "If the current utterance is a short fragment, clarification, "
+                    "or spec that extends the previous exchange (e.g. answering "
+                    "a question the assistant just asked), route it to the same "
+                    "domain as the previous turn. A standalone fresh topic still "
+                    "routes on its own merits."
+                )
             messages = [
                 Message(role="system", content=system),
                 Message(role="user", content=transcript),
@@ -227,7 +249,11 @@ class FastRouter:
                     confidence=confidence,
                     reason=str(parsed.get("reason", ""))[:200],
                 )
-                _cache_put(norm, decision)
+                # Don't cache context-dependent decisions — the same short
+                # utterance should be free to re-route if the conversation
+                # has moved on.
+                if not is_short_followup:
+                    _cache_put(norm, decision)
                 return decision
             except Exception as exc:
                 log_event("router.parse_error", error=repr(exc), raw=raw[:200])

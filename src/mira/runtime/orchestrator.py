@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from mira.agents import agents, install_default_agents, router
+from mira.agents._text import strip_markdown
 from mira.obs.logging import log_event
 from mira.runtime import fast_path, modality, reply_cache
 from mira.runtime.bus import bus
@@ -22,6 +23,7 @@ from mira.runtime.session import (
     clear_pending,
     load_pending,
     record_turn,
+    recent_turns,
     set_pending,
 )
 from mira.runtime.tracing import turn_context
@@ -151,8 +153,36 @@ async def run_turn(
                     via=cached.via,
                 )
 
+        # Pull the last few completed turns. Serves two purposes:
+        #   1. Router continuity: the most recent turn steers short
+        #      follow-ups ("14 inch M5 Pro") back to the right domain.
+        #   2. Specialist memory: the full 3-turn window is passed into
+        #      `AgentRequest.context["recent_turns"]` so specialists can
+        #      prepend it as conversation history — without this, each
+        #      specialist starts cold and re-asks questions already
+        #      answered one turn ago.
+        prior_turn_ctx: dict[str, Any] | None = None
+        recent_turns_payload: list[dict[str, Any]] = []
+        try:
+            rt = recent_turns(user_id=user_id, limit=3)
+            if rt:
+                recent_turns_payload = [
+                    {"transcript": t.transcript, "reply": t.reply, "via": t.via}
+                    for t in rt
+                ]
+                last = rt[-1]
+                prior_turn_ctx = {
+                    "transcript": last.transcript,
+                    "reply": last.reply,
+                    "via": last.via,
+                }
+        except Exception as exc:
+            log_event("orchestrator.recent_turns_error", error=repr(exc))
+
         decision = await router().decide(
-            transcript, agents_catalog=agents().describe()
+            transcript,
+            agents_catalog=agents().describe(),
+            prior_turn=prior_turn_ctx,
         )
         log_event(
             "router.decision",
@@ -189,7 +219,10 @@ async def run_turn(
             agent=target.name,
             goal=transcript,
             transcript=transcript,
-            context={"user_id": user_id},
+            context={
+                "user_id": user_id,
+                "recent_turns": recent_turns_payload,
+            },
         )
         resp: AgentResponse = await target.handle(req)
 
@@ -216,6 +249,7 @@ async def run_turn(
                     transcript=transcript,
                     context={
                         "user_id": user_id,
+                        "recent_turns": recent_turns_payload,
                         "prior_refusal": {
                             "agent": target.name,
                             "reply": resp.speak,
@@ -236,6 +270,13 @@ async def run_turn(
                     )
                 else:
                     log_event("orchestrator.refusal_retry_no_improvement")
+
+        # Strip markdown emphasis (`**bold**`, `__emph__`) from the spoken
+        # reply before it reaches TTS, the card auto-parser, or the session
+        # log. Some agents let the planner leak markdown in despite prompt
+        # hygiene — doing it once here keeps every downstream consumer clean.
+        if resp.speak:
+            resp.speak = strip_markdown(resp.speak)
 
         # Phase A: log-only modality classification. The decision is
         # observed but not yet enforced — downstream behavior is
