@@ -1,5 +1,7 @@
 # MIRA
 
+![MIRA HUD](docs/mira-ui.png)
+
 MIRA is a voice-first personal assistant for macOS designed for people who want more than a chat window. It lives quietly in the menu bar, listens for a wake word, routes each spoken turn through a fast classifier into a supervisor that coordinates specialists, and replies through streaming speech while showing structured cards on a native SwiftUI HUD.
 
 ## What MIRA Does
