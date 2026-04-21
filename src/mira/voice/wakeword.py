@@ -120,33 +120,44 @@ class PorcupineWakeWord:
             self._porcupine = None
 
     def _loop(self) -> None:
-        try:
-            self._open()
-            log_event("wakeword.ready", keyword=self._keyword)
-            while not self._stop.is_set():
-                assert self._recorder is not None and self._porcupine is not None
-                pcm = self._recorder.read()
-                if self._paused.is_paused():
-                    # Drain the buffer but skip detection so TTS audio can't
-                    # ring the wake word while we're talking to the user.
-                    continue
-                idx = self._porcupine.process(pcm)
-                if idx >= 0:
-                    with span("wakeword.trigger", keyword=self._keyword):
-                        bus().publish_nowait("wake.triggered", keyword=self._keyword)
-                        # Release the mic before handing control off.
-                        self._recorder.stop()
-                        try:
-                            self._on_wake()
-                        except Exception as exc:
-                            log_event("wakeword.on_wake_error", error=repr(exc))
-                        # Reopen for the next trigger.
-                        if not self._stop.is_set():
-                            self._recorder.start()
-        except Exception as exc:
-            log_event("wakeword.fatal", error=repr(exc))
-        finally:
-            self._close()
+        # Outer supervisor: a PortAudio hiccup (AirPods connect, another app
+        # grabs the mic, coreaudiod wake-from-sleep) used to kill this thread
+        # and leave the daemon silently deaf. Retry with exponential backoff
+        # so the detector self-heals.
+        backoff = 1.0
+        while not self._stop.is_set():
+            try:
+                self._open()
+                log_event("wakeword.ready", keyword=self._keyword)
+                backoff = 1.0
+                while not self._stop.is_set():
+                    assert self._recorder is not None and self._porcupine is not None
+                    pcm = self._recorder.read()
+                    if self._paused.is_paused():
+                        # Drain the buffer but skip detection so TTS audio can't
+                        # ring the wake word while we're talking to the user.
+                        continue
+                    idx = self._porcupine.process(pcm)
+                    if idx >= 0:
+                        with span("wakeword.trigger", keyword=self._keyword):
+                            bus().publish_nowait("wake.triggered", keyword=self._keyword)
+                            # Release the mic before handing control off.
+                            self._recorder.stop()
+                            try:
+                                self._on_wake()
+                            except Exception as exc:
+                                log_event("wakeword.on_wake_error", error=repr(exc))
+                            # Reopen for the next trigger.
+                            if not self._stop.is_set():
+                                self._recorder.start()
+            except Exception as exc:
+                log_event("wakeword.fatal", error=repr(exc), retry_in_s=round(backoff, 1))
+            finally:
+                self._close()
+            if self._stop.is_set() or self._stop.wait(backoff):
+                break
+            backoff = min(backoff * 2, 30.0)
+            log_event("wakeword.restart", keyword=self._keyword)
 
     def start(self) -> None:
         if self._thread is not None:
@@ -224,72 +235,92 @@ class OpenWakeWordDetector:
         import numpy as np
         import sounddevice as sd
 
-        try:
-            self._model = self._load_model()
-            self._stream = sd.RawInputStream(
-                samplerate=self._SR,
-                blocksize=self._FRAME,
-                dtype="int16",
-                channels=1,
-                callback=self._audio_cb,
-            )
-            self._stream.start()
-            threshold = float(self._settings.wakeword_sensitivity)
-            log_event(
-                "wakeword.ready",
-                backend="openwakeword",
-                model=self._model_ref,
-                threshold=threshold,
-            )
-            while not self._stop.is_set():
-                try:
-                    buf = self._queue.get(timeout=0.25)
-                except queue.Empty:
-                    continue
-                if self._paused.is_paused():
-                    continue
-                arr = np.frombuffer(buf, dtype=np.int16)
-                scores = self._model.predict(arr)
-                # predict returns {model_key: score}; take the max so custom
-                # and stock model keys both work without branching here.
-                best = max(scores.values()) if scores else 0.0
-                self._debug_n = getattr(self, "_debug_n", 0) + 1
-                if self._debug_n % 50 == 0:
-                    import numpy as _np
-                    rms = float(_np.sqrt(_np.mean(arr.astype(_np.float32) ** 2))) / 32768.0
-                    log_event("wakeword.tick", rms=round(rms, 4), score=round(best, 3))
-                if best >= threshold:
-                    with span("wakeword.trigger", backend="openwakeword"):
-                        bus().publish_nowait(
-                            "wake.triggered", backend="openwakeword", score=best
-                        )
-                        # Release the stream so the recorder can grab the mic.
+        # See PorcupineWakeWord._loop — same self-healing rationale.
+        backoff = 1.0
+        while not self._stop.is_set():
+            try:
+                self._model = self._load_model()
+                self._stream = sd.RawInputStream(
+                    samplerate=self._SR,
+                    blocksize=self._FRAME,
+                    dtype="int16",
+                    channels=1,
+                    callback=self._audio_cb,
+                )
+                self._stream.start()
+                threshold = float(self._settings.wakeword_sensitivity)
+                log_event(
+                    "wakeword.ready",
+                    backend="openwakeword",
+                    model=self._model_ref,
+                    threshold=threshold,
+                )
+                backoff = 1.0
+                while not self._stop.is_set():
+                    try:
+                        buf = self._queue.get(timeout=0.25)
+                    except queue.Empty:
+                        continue
+                    if self._paused.is_paused():
+                        continue
+                    arr = np.frombuffer(buf, dtype=np.int16)
+                    scores = self._model.predict(arr)
+                    # predict returns {model_key: score}; take the max so custom
+                    # and stock model keys both work without branching here.
+                    best = max(scores.values()) if scores else 0.0
+                    self._debug_n = getattr(self, "_debug_n", 0) + 1
+                    if self._debug_n % 50 == 0:
+                        import numpy as _np
+                        rms = float(_np.sqrt(_np.mean(arr.astype(_np.float32) ** 2))) / 32768.0
+                        log_event("wakeword.tick", rms=round(rms, 4), score=round(best, 3))
+                    if best >= threshold:
+                        with span("wakeword.trigger", backend="openwakeword"):
+                            bus().publish_nowait(
+                                "wake.triggered", backend="openwakeword", score=best
+                            )
+                            # Release the stream so the recorder can grab the mic.
+                            self._stream.stop()
+                            try:
+                                self._on_wake()
+                            except Exception as exc:
+                                log_event("wakeword.on_wake_error", error=repr(exc))
+                            if not self._stop.is_set():
+                                # Drain stale frames captured during the turn —
+                                # otherwise the next loop iteration feeds
+                                # minute-old audio into the detector.
+                                while not self._queue.empty():
+                                    try:
+                                        self._queue.get_nowait()
+                                    except queue.Empty:
+                                        break
+                                self._stream.start()
+            except Exception as exc:
+                log_event(
+                    "wakeword.fatal",
+                    backend="openwakeword",
+                    error=repr(exc),
+                    retry_in_s=round(backoff, 1),
+                )
+            finally:
+                if self._stream is not None:
+                    try:
                         self._stream.stop()
-                        try:
-                            self._on_wake()
-                        except Exception as exc:
-                            log_event("wakeword.on_wake_error", error=repr(exc))
-                        if not self._stop.is_set():
-                            # Drain stale frames captured during the turn —
-                            # otherwise the next loop iteration feeds
-                            # minute-old audio into the detector.
-                            while not self._queue.empty():
-                                try:
-                                    self._queue.get_nowait()
-                                except queue.Empty:
-                                    break
-                            self._stream.start()
-        except Exception as exc:
-            log_event("wakeword.fatal", backend="openwakeword", error=repr(exc))
-        finally:
-            if self._stream is not None:
-                try:
-                    self._stream.stop()
-                    self._stream.close()
-                except Exception:
-                    pass
-                self._stream = None
-            self._model = None
+                        self._stream.close()
+                    except Exception:
+                        pass
+                    self._stream = None
+                self._model = None
+                # Drop frames captured on the dead stream so a reopened
+                # stream doesn't process pre-error audio.
+                while not self._queue.empty():
+                    try:
+                        self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+            if self._stop.is_set() or self._stop.wait(backoff):
+                break
+            backoff = min(backoff * 2, 30.0)
+            log_event("wakeword.restart", backend="openwakeword")
 
     def start(self) -> None:
         if self._thread is not None:
